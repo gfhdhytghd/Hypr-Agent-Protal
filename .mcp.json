@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "hyprcum": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["mcp/hyprcum_mcp.py"],
+      "cwd": "."
+    }
+  }
+}

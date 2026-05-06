@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+import argparse
+import base64
+import json
+import os
+import pathlib
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import zlib
+
+
+def _chunk(kind: bytes, data: bytes) -> bytes:
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+
+
+def rgba_to_png(width: int, height: int, rgba: bytes) -> bytes:
+    if width <= 0 or height <= 0:
+        raise ValueError("invalid image dimensions")
+    expected = width * height * 4
+    if len(rgba) != expected:
+        raise ValueError(f"rgba byte count mismatch: got {len(rgba)}, expected {expected}")
+
+    rows = bytearray()
+    stride = width * 4
+    for y in range(height):
+        rows.append(0)
+        start = y * stride
+        rows.extend(rgba[start : start + stride])
+
+    return b"".join(
+        [
+            b"\x89PNG\r\n\x1a\n",
+            _chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)),
+            _chunk(b"IDAT", zlib.compress(bytes(rows), 6)),
+            _chunk(b"IEND", b""),
+        ]
+    )
+
+
+def render_session_png(session: dict) -> tuple[bytes, dict]:
+    monitors = [m for m in session.get("monitors", []) if m.get("artifactPath") and m.get("artifactWidth") and m.get("artifactHeight")]
+    if not monitors:
+        raise RuntimeError("no rendered monitor artifacts in screenshot session")
+
+    min_x = min(float(m["geometry"]["x"]) for m in monitors)
+    min_y = min(float(m["geometry"]["y"]) for m in monitors)
+    max_x = max(float(m["geometry"]["x"]) + float(m["geometry"]["width"]) for m in monitors)
+    max_y = max(float(m["geometry"]["y"]) + float(m["geometry"]["height"]) for m in monitors)
+    out_scale = max(float(m.get("scale") or 1.0) for m in monitors)
+    out_w = max(1, round((max_x - min_x) * out_scale))
+    out_h = max(1, round((max_y - min_y) * out_scale))
+    canvas = bytearray(out_w * out_h * 4)
+
+    for m in monitors:
+        src_w = int(m["artifactWidth"])
+        src_h = int(m["artifactHeight"])
+        raw = pathlib.Path(m["artifactPath"]).read_bytes()
+        if len(raw) != src_w * src_h * 4:
+            raise RuntimeError(f"invalid artifact size for {m['artifactPath']}")
+
+        geom = m["geometry"]
+        dst_x = round((float(geom["x"]) - min_x) * out_scale)
+        dst_y = round((float(geom["y"]) - min_y) * out_scale)
+        dst_w = max(1, round(float(geom["width"]) * out_scale))
+        dst_h = max(1, round(float(geom["height"]) * out_scale))
+
+        for y in range(dst_h):
+            sy = min(src_h - 1, int(y * src_h / dst_h))
+            out_y = dst_y + y
+            if out_y < 0 or out_y >= out_h:
+                continue
+            for x in range(dst_w):
+                sx = min(src_w - 1, int(x * src_w / dst_w))
+                out_x = dst_x + x
+                if out_x < 0 or out_x >= out_w:
+                    continue
+                src_i = (sy * src_w + sx) * 4
+                dst_i = (out_y * out_w + out_x) * 4
+                canvas[dst_i : dst_i + 4] = raw[src_i : src_i + 4]
+
+    metadata = {
+        "width": out_w,
+        "height": out_h,
+        "scale": out_scale,
+        "logicalBounds": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
+        "cursorPosition": session.get("cursorPosition"),
+        "windows": session.get("windows", []),
+        "monitors": [
+            {
+                "name": m.get("name"),
+                "geometry": m.get("geometry"),
+                "scale": m.get("scale"),
+                "artifactWidth": m.get("artifactWidth"),
+                "artifactHeight": m.get("artifactHeight"),
+            }
+            for m in monitors
+        ],
+    }
+    return rgba_to_png(out_w, out_h, bytes(canvas)), metadata
+
+
+def dispatch(*args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["hyprctl", "dispatch", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+
+
+def screenshot(args: argparse.Namespace) -> int:
+    root = pathlib.Path(args.output_dir or tempfile.gettempdir()) / f"hyprcum-{os.getuid()}"
+    root.mkdir(mode=0o700, parents=True, exist_ok=True)
+    session_path = root / f"session-{time.time_ns()}.json"
+
+    result = dispatch(args.dispatcher, str(session_path))
+    if result.returncode != 0:
+        print(result.stderr or result.stdout, file=sys.stderr, end="")
+        return result.returncode or 1
+    if not session_path.exists():
+        print(f"screenshot session json was not written: {session_path}", file=sys.stderr)
+        return 1
+
+    session = json.loads(session_path.read_text())
+    png, metadata = render_session_png(session)
+
+    png_path = session_path.with_suffix(".png")
+    png_path.write_bytes(png)
+    metadata.update({"sessionPath": str(session_path), "pngPath": str(png_path)})
+
+    if args.base64:
+        metadata["pngBase64"] = base64.b64encode(png).decode("ascii")
+    print(json.dumps(metadata, ensure_ascii=False))
+    return 0
+
+
+def pointer(args: argparse.Namespace) -> int:
+    payload = ",".join([args.target, str(args.x), str(args.y), args.action, args.button])
+    result = dispatch(args.dispatcher, payload)
+    if result.returncode != 0:
+        print(result.stderr or result.stdout, file=sys.stderr, end="")
+        return result.returncode or 1
+    if args.json:
+        print(json.dumps({"ok": True, "target": args.target, "x": args.x, "y": args.y, "action": args.action, "button": args.button}))
+    else:
+        print(result.stdout, end="")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="HyprCUM command line bridge")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    shot = sub.add_parser("screenshot", help="capture a compositor screenshot session")
+    shot.add_argument("--dispatcher", default="HyprCUM:screenshot")
+    shot.add_argument("--output-dir")
+    shot.add_argument("--base64", action="store_true")
+    shot.set_defaults(func=screenshot)
+
+    ptr = sub.add_parser("pointer", help="send pointer input to a target window")
+    ptr.add_argument("target", help="Hyprland window regex, for example address:0x1234")
+    ptr.add_argument("x", type=float, help="global logical x coordinate")
+    ptr.add_argument("y", type=float, help="global logical y coordinate")
+    ptr.add_argument("action", choices=["move", "motion", "click", "doubleclick", "double-click", "press", "down", "release", "up"])
+    ptr.add_argument("button", nargs="?", default="left")
+    ptr.add_argument("--dispatcher", default="HyprCUM:pointer")
+    ptr.add_argument("--json", action="store_true")
+    ptr.set_defaults(func=pointer)
+
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

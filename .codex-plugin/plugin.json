@@ -1,0 +1,14 @@
+{
+  "name": "hypr-computer-use-mcp",
+  "version": "0.1.0",
+  "description": "Hyprland background screenshot and pointer Computer Use MCP bridge",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Hypr Computer Use MCP",
+    "shortDescription": "Computer Use primitives for Hyprland",
+    "developerName": "wilf",
+    "category": "Developer Tools",
+    "capabilities": ["mcp", "computer-use"],
+    "defaultPrompt": "Use the Hyprland computer tool for screenshots and target-window pointer input."
+  }
+}
