@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.31"
+SERVER_VERSION = "0.3.38"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
@@ -90,6 +90,8 @@ COMPUTER_SCHEMA: dict[str, Any] = {
                 "paste_file",
                 "paste_image",
                 "session",
+                "get_app_state",
+                "read_app_state",
                 "wait",
                 "wait_for_window",
                 "wait_for_close",
@@ -906,6 +908,18 @@ def sync_related_session(target: str, session_info: dict[str, Any]) -> list[dict
     except Exception as exc:
         session_info["relatedError"] = str(exc)
         return []
+
+
+def begin_related_action_session(target: str) -> dict[str, Any]:
+    return {"begin": session_action("begin", target), "sync": None, "end": None, "active": False}
+
+
+def finish_related_action_session(target: str, session_info: dict[str, Any]) -> list[dict[str, Any]]:
+    related_windows = sync_related_session(target, session_info)
+    session_info["active"] = bool(related_windows)
+    if not related_windows:
+        session_info["end"] = session_action("end", target)
+    return related_windows
 
 
 def normalize(value: Any) -> str:
@@ -3556,6 +3570,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
     target = str(snapshot["target"])
     button = str(args.get("mouse_button") or "left")
     click_count = int(args.get("click_count") or 1)
+    session_info = begin_related_action_session(target)
 
     element_index = args.get("element_index")
     element = None
@@ -3579,14 +3594,16 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
             else:
                 control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
                 if atspi_do_action_isolated(snapshot, element):
+                    finish_related_action_session(target, session_info)
                     return mcp_snapshot_result(
                         snapshot_after_action(
                             app,
                             snapshot,
-                            {"method": "atspi", "clickedElement": compact_element_info(element, float(x), float(y), coordinate_space)},
+                            {"method": "atspi", "clickedElement": compact_element_info(element, float(x), float(y), coordinate_space), "session": session_info},
                         )
                     )
                 if mode == "atspi":
+                    finish_related_action_session(target, session_info)
                     raise RuntimeError("AT-SPI element action failed; use element_click_mode=pointer for native pointer click")
 
     global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
@@ -3609,12 +3626,16 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
             time.sleep(0.12)
     if action == "doubleclick":
         call_ctl(["pointer", "--json", target, str(global_x), str(global_y), "doubleclick", button])
+    finish_related_action_session(target, session_info)
+    info["session"] = session_info
     return mcp_snapshot_result(snapshot_after_action(app, snapshot, info))
 
 
 def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
     snapshot = current_snapshot(app)
+    target = str(snapshot["target"])
+    session_info = begin_related_action_session(target)
     element = lookup_element(snapshot, str(args.get("element_index") or ""))
     action = str(args.get("action") or "")
     if not action:
@@ -3625,8 +3646,10 @@ def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
     except Exception:
         control_overlay(snapshot, action=action)
     if not atspi_do_action_isolated(snapshot, element, action):
+        finish_related_action_session(target, session_info)
         raise RuntimeError(f"{action} is not a valid secondary action for element")
-    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+    finish_related_action_session(target, session_info)
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot, {"method": "atspi", "action": action, "session": session_info}))
 
 
 def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
@@ -3635,6 +3658,8 @@ def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
     if not menu_index:
         raise RuntimeError("activate_menu_item requires menu_index from get_app_state")
     snapshot = current_snapshot(app)
+    target = str(snapshot["target"])
+    session_info = begin_related_action_session(target)
     item = find_global_menu_item(snapshot, menu_index)
     provider = str(item.get("provider") or "")
     if provider == "dbusmenu":
@@ -3642,8 +3667,11 @@ def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
     elif provider == "gmenu":
         result = activate_gmenu_item(item)
     else:
+        finish_related_action_session(target, session_info)
         raise RuntimeError(f"unsupported global menu provider: {provider}")
     time.sleep(0.12)
+    finish_related_action_session(target, session_info)
+    result["session"] = session_info
     return mcp_snapshot_result(snapshot_after_action(app, snapshot, result))
 
 
@@ -4011,6 +4039,8 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
 
     if action in {"launch", "launch_app", "open_app"}:
         return tool_launch_app(args)
+    if action in {"get_app_state", "read_app_state"}:
+        return tool_get_app_state(args)
     if action == "wait_for_window":
         return semantic_wait_for_window(args)
     if action == "wait_for_close":
