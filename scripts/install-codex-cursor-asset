@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+from pathlib import Path
+
+from PIL import Image
+
+
+OFFICIAL_CURSOR_NAME = "official-software-cursor-window-252.png"
+DEFAULT_OPEN_CODEX_REFERENCE = Path(
+    "/tmp/open-codex-computer-use/docs/references/codex-computer-use-reverse-engineering/"
+    "assets/extracted-2026-04-19"
+) / OFFICIAL_CURSOR_NAME
+
+
+def default_output_dir() -> Path:
+    xdg_config = os.environ.get("XDG_CONFIG_HOME")
+    if xdg_config:
+        return Path(xdg_config) / "hypr-agent-protal"
+    return Path.home() / ".config" / "hypr-agent-protal"
+
+
+def candidate_sources() -> list[Path]:
+    candidates: list[Path] = []
+    if DEFAULT_OPEN_CODEX_REFERENCE.exists():
+        candidates.append(DEFAULT_OPEN_CODEX_REFERENCE)
+
+    cache_root = Path.home() / ".codex" / "plugins" / "cache"
+    if cache_root.exists():
+        patterns = [
+            f"**/{OFFICIAL_CURSOR_NAME}",
+            "**/official-software-cursor-window.png",
+            "**/software-cursor*.png",
+            "**/SoftwareCursor*.png",
+        ]
+        for pattern in patterns:
+            candidates.extend(sorted(cache_root.glob(pattern)))
+
+    return candidates
+
+
+def premultiplied_rgba_bytes(png_path: Path) -> bytes:
+    image = Image.open(png_path).convert("RGBA")
+    if image.size != (252, 252):
+        raise SystemExit(f"{png_path} is {image.size}, expected 252x252")
+
+    output = bytearray()
+    data = image.tobytes()
+    for offset in range(0, len(data), 4):
+        red, green, blue, alpha = data[offset : offset + 4]
+        output.extend(
+            (
+                (red * alpha + 127) // 255,
+                (green * alpha + 127) // 255,
+                (blue * alpha + 127) // 255,
+                alpha,
+            )
+        )
+    return bytes(output)
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Install the Codex Computer Use cursor texture for hypr-agent-protal.")
+    parser.add_argument("source", nargs="?", type=Path, help="official 252x252 cursor PNG to install")
+    parser.add_argument("--output-dir", type=Path, default=default_output_dir())
+    args = parser.parse_args()
+
+    source = args.source
+    if source is None:
+        sources = candidate_sources()
+        if not sources:
+            raise SystemExit("No official cursor PNG found. Pass the extracted 252x252 PNG path explicitly.")
+        source = sources[0]
+
+    output_dir = args.output_dir.expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    raw_path = output_dir / "codex-cursor-252.abgr"
+    png_copy = output_dir / "codex-cursor-252.png"
+
+    raw_path.write_bytes(premultiplied_rgba_bytes(source))
+    shutil.copyfile(source, png_copy)
+
+    print(f"source={source}")
+    print(f"raw={raw_path}")
+    print(f"png={png_copy}")
+    print("hypr-agent-protal will use the raw texture after the plugin is reloaded.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

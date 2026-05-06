@@ -25,9 +25,11 @@
 #include <charconv>
 #include <chrono>
 #include <cctype>
+#include <cstdlib>
 #include <cmath>
 #include <drm_fourcc.h>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
 #include <limits>
 #include <linux/input-event-codes.h>
@@ -58,10 +60,16 @@ std::optional<Time::steady_tp>   g_agentPointerUpdated;
 std::optional<Time::steady_tp>   g_agentPointerMotionStarted;
 std::string                      g_agentPointerAction;
 SP<CTexture>                     g_codexCursorTexture;
+Vector2D                         g_codexCursorTextureSize;
+double                           g_codexCursorHotspotX = 0.0;
+double                           g_codexCursorHotspotY = 0.0;
 
 constexpr int    CODEX_CURSOR_TEXTURE_SIZE = 160;
+constexpr int    CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE = 252;
 constexpr double CODEX_CURSOR_HOTSPOT_X = 76.6;
 constexpr double CODEX_CURSOR_HOTSPOT_Y = 89.3;
+constexpr double CODEX_OFFICIAL_CURSOR_HOTSPOT_X = 120.7;
+constexpr double CODEX_OFFICIAL_CURSOR_HOTSPOT_Y = 140.6;
 constexpr double CODEX_CURSOR_LOGICAL_SIZE = 64.0;
 constexpr double CODEX_CURSOR_MOTION_MS = 1429.1667;
 constexpr double CODEX_CURSOR_ANIMATION_MS = 1680.0;
@@ -85,6 +93,40 @@ bool configBool(const std::string& suffix, bool fallback) {
 
 int configInt(const std::string& suffix, int fallback) {
     return static_cast<int>(configValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback));
+}
+
+std::string configString(const std::string& suffix, const std::string& fallback) {
+    const auto value = HyprlandAPI::getConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:" + suffix);
+    if (!value)
+        return fallback;
+
+    try {
+        return std::string{std::any_cast<Hyprlang::STRING>(value->getValue())};
+    } catch (const std::bad_any_cast&) {
+        return fallback;
+    }
+}
+
+std::filesystem::path defaultCursorTexturePath() {
+    if (const char* xdgConfig = std::getenv("XDG_CONFIG_HOME"); xdgConfig && *xdgConfig)
+        return std::filesystem::path{xdgConfig} / "hypr-agent-protal" / "codex-cursor-252.abgr";
+    if (const char* home = std::getenv("HOME"); home && *home)
+        return std::filesystem::path{home} / ".config" / "hypr-agent-protal" / "codex-cursor-252.abgr";
+    return {};
+}
+
+std::filesystem::path expandUserPath(std::string path) {
+    if (path.empty())
+        return {};
+    if (path[0] == '~') {
+        if (const char* home = std::getenv("HOME"); home && *home) {
+            if (path.size() == 1)
+                return std::filesystem::path{home};
+            if (path[1] == '/')
+                return std::filesystem::path{home} / path.substr(2);
+        }
+    }
+    return std::filesystem::path{path};
 }
 
 CBox agentIndicatorBounds(const Vector2D& globalPos) {
@@ -300,7 +342,32 @@ void drawTexturePolygon(std::vector<uint8_t>& pixels, const std::array<Vector2D,
             blendTexturePixel(pixels, x, y, color, polygonCoverage(x, y, polygon));
 }
 
+SP<CTexture> loadOfficialCodexCursorTexture() {
+    const auto configuredPath = configString("cursor_texture_path", "");
+    const auto texturePath = configuredPath.empty() ? defaultCursorTexturePath() : expandUserPath(configuredPath);
+    if (texturePath.empty() || !std::filesystem::exists(texturePath))
+        return {};
+
+    std::ifstream file{texturePath, std::ios::binary};
+    if (!file)
+        return {};
+
+    std::vector<uint8_t> pixels(std::istreambuf_iterator<char>{file}, {});
+    constexpr size_t     EXPECTED_SIZE = CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE * CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE * 4;
+    if (pixels.size() != EXPECTED_SIZE)
+        return {};
+
+    g_codexCursorTextureSize = Vector2D{CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE, CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE};
+    g_codexCursorHotspotX = CODEX_OFFICIAL_CURSOR_HOTSPOT_X;
+    g_codexCursorHotspotY = CODEX_OFFICIAL_CURSOR_HOTSPOT_Y;
+    return makeShared<CTexture>(DRM_FORMAT_ABGR8888, pixels.data(), CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE * 4, g_codexCursorTextureSize, true);
+}
+
 SP<CTexture> codexCursorTexture() {
+    if (g_codexCursorTexture)
+        return g_codexCursorTexture;
+
+    g_codexCursorTexture = loadOfficialCodexCursorTexture();
     if (g_codexCursorTexture)
         return g_codexCursorTexture;
 
@@ -320,8 +387,11 @@ SP<CTexture> codexCursorTexture() {
     drawTexturePolyline(pixels, pointer, 4.8, Rgba{1.0, 1.0, 1.0, 0.94}, true);
     drawTexturePolyline(pixels, pointer, 1.35, Rgba{0.68, 0.70, 0.92, 0.26}, true);
 
+    g_codexCursorTextureSize = Vector2D{CODEX_CURSOR_TEXTURE_SIZE, CODEX_CURSOR_TEXTURE_SIZE};
+    g_codexCursorHotspotX = CODEX_CURSOR_HOTSPOT_X;
+    g_codexCursorHotspotY = CODEX_CURSOR_HOTSPOT_Y;
     g_codexCursorTexture = makeShared<CTexture>(DRM_FORMAT_ABGR8888, pixels.data(), CODEX_CURSOR_TEXTURE_SIZE * 4,
-                                                Vector2D{CODEX_CURSOR_TEXTURE_SIZE, CODEX_CURSOR_TEXTURE_SIZE}, true);
+                                                g_codexCursorTextureSize, true);
     return g_codexCursorTexture;
 }
 
@@ -471,11 +541,15 @@ void renderAgentIndicator(eRenderStage stage) {
         g_agentPointerAction == "press" || g_agentPointerAction == "down" || g_agentPointerAction == "release" || g_agentPointerAction == "up";
     const double pulse = clickLike ? std::clamp(1.0 - ageMs / 420.0, 0.0, 1.0) : 0.0;
     const double renderSize = (CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse) * scale;
-    const double x = tip.x - (CODEX_CURSOR_HOTSPOT_X / CODEX_CURSOR_TEXTURE_SIZE) * renderSize;
-    const double y = tip.y - (CODEX_CURSOR_HOTSPOT_Y / CODEX_CURSOR_TEXTURE_SIZE) * renderSize;
+    const auto   texture = codexCursorTexture();
+    if (!texture || g_codexCursorTextureSize.x <= 0.0 || g_codexCursorTextureSize.y <= 0.0)
+        return;
+
+    const double x = tip.x - (g_codexCursorHotspotX / g_codexCursorTextureSize.x) * renderSize;
+    const double y = tip.y - (g_codexCursorHotspotY / g_codexCursorTextureSize.y) * renderSize;
 
     CTexPassElement::SRenderData data;
-    data.tex = codexCursorTexture();
+    data.tex = texture;
     data.box = CBox{x, y, renderSize, renderSize};
     data.a = static_cast<float>(fade);
     data.clipBox = windowBox.copy().translate(-monitor->m_position).scale(scale).round();
@@ -1436,6 +1510,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_session", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:show_indicator", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:indicator_timeout_ms", Hyprlang::INT{30000});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:cursor_texture_path", Hyprlang::STRING{""});
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:keyboard", dispatchKeyboard);
@@ -1449,7 +1524,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.2.6",
+        .version = "0.2.7",
     };
 }
 

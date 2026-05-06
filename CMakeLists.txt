@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(HyprAgentProtal VERSION "0.2.6")
+project(HyprAgentProtal VERSION "0.2.7")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,13 +38,14 @@ target_link_libraries(hypr_agent_protal PRIVATE ${HYPR_DEPS_LIBRARIES} nlohmann_
 target_link_options(hypr_agent_protal PRIVATE -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
 
 install(TARGETS hypr_agent_protal LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(PROGRAMS scripts/hypr-agent-protalctl mcp/hypr-agent-protal-mcp.py DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS scripts/hypr-agent-protalctl scripts/install-codex-cursor-asset mcp/hypr-agent-protal-mcp.py DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(BUILD_TESTING AND Python3_Interpreter_FOUND)
   add_test(
     NAME hypr-agent-protal-python-compile
     COMMAND ${Python3_EXECUTABLE} -m py_compile
       ${CMAKE_SOURCE_DIR}/scripts/hypr-agent-protalctl
+      ${CMAKE_SOURCE_DIR}/scripts/install-codex-cursor-asset
       ${CMAKE_SOURCE_DIR}/mcp/hypr-agent-protal-mcp.py
       ${CMAKE_SOURCE_DIR}/tests/mcp_smoke.py
       ${CMAKE_SOURCE_DIR}/tests/cursor_render.py

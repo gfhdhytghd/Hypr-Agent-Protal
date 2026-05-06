@@ -93,6 +93,13 @@ plugin {
     allow_session = 1
     show_indicator = 1
     indicator_timeout_ms = 30000
+    # cursor_texture_path = ~/.config/hypr-agent-protal/codex-cursor-252.abgr
   }
 }
+```
+
+The visible cursor uses `~/.config/hypr-agent-protal/codex-cursor-252.abgr` when present, and otherwise falls back to a procedural texture. Install an extracted Codex Computer Use cursor PNG into that local raw format with:
+
+```sh
+scripts/install-codex-cursor-asset
 ```
