@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.6"
+SERVER_VERSION = "0.3.7"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -182,7 +182,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "restore_delay": {
             "type": "number",
             "description": "Seconds to wait before restoring clipboard after paste.",
-            "default": 0.35,
+            "default": 1.0,
         },
         "path": {"type": "string", "description": "Filesystem path for paste_file/paste_image actions."},
         "duration": {"type": "number", "description": "Duration in seconds for wait or drag pacing."},
@@ -194,7 +194,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "visible_workspace": {"type": "boolean", "description": "For windows, only return active-workspace clients."},
         "related_to": {
             "type": "string",
-            "description": "For windows, return the selected Hyprland window and same-process related windows such as XWayland popups.",
+            "description": "For windows, return the selected Hyprland window and same-process related windows such as dialogs or helper popups.",
         },
     },
     "required": ["action"],
@@ -677,6 +677,37 @@ def target_uses_xwayland(target: str, window: dict[str, Any] | None = None) -> b
             if isinstance(candidate.get("xwayland"), bool):
                 return bool(candidate["xwayland"])
     return None
+
+
+def related_windows_for(target: str) -> list[dict[str, Any]]:
+    return call_ctl(["windows", "--related-to", target]).get("windows", [])
+
+
+def related_popups_for(target: str) -> list[dict[str, Any]]:
+    return [
+        window
+        for window in related_windows_for(target)
+        if window.get("hyprAgentProtalRelation") == "related"
+        and isinstance(window.get("address"), str)
+        and not window.get("hidden", False)
+        and window.get("mapped", True)
+    ]
+
+
+def session_action(action: str, target: str) -> dict[str, Any]:
+    try:
+        return call_ctl(["session", "--json", action, target])
+    except Exception as exc:
+        return {"ok": False, "action": action, "target": target, "error": str(exc)}
+
+
+def sync_related_session(target: str, session_info: dict[str, Any]) -> list[dict[str, Any]]:
+    session_info["sync"] = session_action("sync", target)
+    try:
+        return related_popups_for(target)
+    except Exception as exc:
+        session_info["relatedError"] = str(exc)
+        return []
 
 
 def normalize(value: Any) -> str:
@@ -1980,7 +2011,7 @@ def prefer_related_target(target: str, enabled: bool = True) -> tuple[str, dict[
         return target, None
 
     try:
-        windows = call_ctl(["windows", "--related-to", target]).get("windows", [])
+        windows = related_windows_for(target)
     except Exception:
         return target, None
 
@@ -2043,23 +2074,43 @@ def paste(
     if target_for_input is None:
         prefer_related = args.get("prefer_related")
         target_for_input, related = prefer_related_target(target, True if not isinstance(prefer_related, bool) else prefer_related)
+    session_info: dict[str, Any] = {"begin": session_action("begin", target), "sync": None, "end": None, "active": False}
     time.sleep(0.08)
     key_info = keyboard(target_for_input, "v", "ctrl", float(x) if isinstance(x, (int, float)) else None, float(y) if isinstance(y, (int, float)) else None)
+
+    time.sleep(0.12)
+    related_windows = sync_related_session(target, session_info)
 
     restore_info: dict[str, Any] = {"methods": [], "checks": [], "verified": False}
     should_restore = args.get("restore_clipboard")
     if text_clipboard_snapshot is not None and (True if not isinstance(should_restore, bool) else should_restore):
-        delay = args.get("restore_delay", 0.35)
+        delay = args.get("restore_delay", 1.0)
         if not isinstance(delay, (int, float)):
-            delay = 0.35
+            delay = 1.0
         time.sleep(max(0.0, min(float(delay), 5.0)))
         restore_info = restore_clipboard_text(text_clipboard_snapshot)
+
+    related_windows = sync_related_session(target, session_info)
+    session_info["active"] = bool(related_windows)
+    if not related_windows:
+        session_info["end"] = session_action("end", target)
+
+    next_step = None
+    if related_windows:
+        first = related_windows[0]
+        next_step = (
+            f'A related popup/dialog opened; operate it with app="address:{first.get("address")}" '
+            "before returning to the root window."
+        )
 
     return {
         "ok": True,
         "target": target,
         "resolvedTarget": target_for_input,
         "relatedTarget": related,
+        "relatedWindows": related_windows,
+        "session": session_info,
+        "next": next_step,
         "method": "paste",
         "clipboard": methods,
         "pasteKey": key_info,
@@ -2112,6 +2163,14 @@ def synthetic_elements(window: dict[str, Any], screenshot: dict[str, Any]) -> tu
 
 def build_app_snapshot(app_query: str) -> dict[str, Any]:
     window = resolve_hypr_window(app_query)
+    target = window_selector(window)
+    try:
+        related_windows = related_windows_for(target)
+    except Exception as exc:
+        related_windows = []
+        related_error = str(exc)
+    else:
+        related_error = ""
     screenshot, png_base64 = screenshot_for_window(window)
     atspi = atspi_snapshot_isolated(window, screenshot)
     elements = atspi["elements"] if atspi["status"] == "ok" and atspi["elements"] else []
@@ -2128,14 +2187,22 @@ def build_app_snapshot(app_query: str) -> dict[str, Any]:
         "app": app,
         "windowTitle": str(window.get("title") or ""),
         "windowBounds": screenshot.get("logicalBounds") or window_geometry(window),
-        "target": window_selector(window),
+        "target": target,
         "window": window,
+        "relatedWindows": related_windows,
+        "relatedTargets": [
+            f"address:{related['address']}"
+            for related in related_windows
+            if related.get("hyprAgentProtalRelation") == "related" and isinstance(related.get("address"), str)
+        ],
         "screenshot": screenshot,
         "screenshotPngBase64": png_base64,
         "treeLines": tree_lines,
         "elements": elements,
         "accessibility": {k: v for k, v in atspi.items() if k not in {"elements", "treeLines"}},
     }
+    if related_error:
+        snapshot["relatedWindowsError"] = related_error
     remember_snapshot(app_query, snapshot)
     return snapshot
 
@@ -2154,6 +2221,30 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
             bool(window.get("xwayland")),
         ),
     ]
+    related = [
+        window
+        for window in snapshot.get("relatedWindows") or []
+        if isinstance(window, dict) and window.get("hyprAgentProtalRelation") == "related"
+    ]
+    if related:
+        lines.extend(["", "Related windows/dialogs:"])
+        for window in related:
+            title = str(window.get("title") or window.get("initialTitle") or "")
+            klass = str(window.get("class") or window.get("initialClass") or "")
+            workspace = window.get("workspace") or {}
+            workspace_name = workspace.get("name", workspace.get("id", ""))
+            kind = window.get("hyprAgentProtalWindowKind") or "related"
+            lines.append(
+                '- target=address:{0} title="{1}" class={2} kind={3} workspace={4}'.format(
+                    window.get("address"),
+                    title,
+                    klass,
+                    kind,
+                    workspace_name,
+                )
+            )
+    elif snapshot.get("relatedWindowsError"):
+        lines.extend(["", f"Related windows: unavailable. {snapshot.get('relatedWindowsError')}"])
     lines.extend(str(line) for line in snapshot.get("treeLines") or [])
     accessibility = snapshot.get("accessibility") or {}
     if accessibility.get("status") != "ok":

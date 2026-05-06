@@ -25,7 +25,7 @@ For XWayland windows, the dispatcher sends to the `wlSurface()` resource and sca
 
 The keyboard dispatcher temporarily focuses the target surface, sends key events and modifier state through `g_pSeatManager`, then restores the previous keyboard focus. The MCP layer uses that for shortcuts and text/file/image paste flows.
 
-For apps that spawn visible XWayland helper windows during background control, `hypr-agent-protal:session begin,<target>` records the target window workspace. New same-process related windows opened during the session are moved back to that workspace instead of appearing on the agent's current workspace.
+For apps that spawn visible helper windows or dialogs during background control, `hypr-agent-protal:session begin,<target>` records the target window workspace. New same-process related windows opened during the session are moved back to that workspace instead of appearing on the agent's current workspace. Paste actions begin and sync this session automatically; if a paste opens a related dialog, the MCP result and the next `get_app_state` output include the dialog's `address:0x...` target so the agent can operate that dialog before returning to the root window.
 
 ## Build
 
@@ -141,14 +141,14 @@ Persist `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` in the compositor environment befor
 The compatibility `computer` tool still exposes these lower-level actions:
 
 - `screenshot`: captures compositor screenshots and returns PNG image content plus metadata. Pass `target` for unoccluded target-window capture. Screenshot cursor drawing is a debug option and is off by default; use `show_cursor=true` or `cursor_source` values `auto`, `agent`, `hyprland`, `none` to draw it into the returned PNG.
-- `windows`: lists Hyprland clients with addresses, classes, titles, geometry, and workspace data. Pass `related_to` to return the selected client plus same-process related windows such as XWayland popups.
+- `windows`: lists Hyprland clients with addresses, classes, titles, geometry, and workspace data. Pass `related_to` to return the selected client plus same-process related windows such as dialogs or helper popups.
 - `move`, `click`, `doubleclick`, `press`, `release`: sends pointer input to a target window selector such as `address:0x1234`.
 - `scroll`: sends wheel axis events to a target window.
 - `drag`: presses, moves, and releases on the target window through the native pointer dispatcher.
 - `key`: sends a shortcut such as `ctrl+v`, `enter`, `alt+left`, or `escape` to a target window. It accepts `key`, `keys`, `modifiers`, and raw evdev `keycode` for ydotool-style fallback.
 - `type`: sends text to the target input. Use `method` values `auto`, `keys`, or `paste`; by default it types short ASCII text as key events and uses clipboard paste for Unicode or longer text.
 - `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
-- Text paste actions prefer same-process XWayland popup windows and restore the previous text clipboard after paste when possible.
+- Text paste actions prefer same-process related popup/dialog windows, keep the target session active while a related dialog is open, and restore the previous text clipboard after paste when possible.
 - `copy_text`: writes text to the clipboard without sending input.
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
@@ -193,6 +193,9 @@ plugin {
     allow_session = 1
     show_indicator = 1
     indicator_timeout_ms = 30000
+    # Keep keyboard focus briefly after modified shortcuts such as Ctrl+V so
+    # clients can finish asynchronous clipboard reads before focus is restored.
+    keyboard_restore_delay_ms = 700
     # cursor_texture_path = ~/.config/hypr-agent-protal/codex-cursor-252.abgr
   }
 }

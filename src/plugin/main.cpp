@@ -48,6 +48,7 @@ inline HANDLE g_pluginHandle = nullptr;
 namespace {
 
 std::vector<SP<CEventLoopTimer>> g_pointerRestoreTimers;
+std::vector<SP<CEventLoopTimer>> g_keyboardRestoreTimers;
 std::vector<SP<CEventLoopTimer>> g_workspaceRestackTimers;
 SP<CEventLoopTimer>              g_indicatorHideTimer;
 SP<CEventLoopTimer>              g_indicatorAnimationTimer;
@@ -155,6 +156,10 @@ int indicatorTimeoutMs() {
 
 Time::steady_dur indicatorTimeout() {
     return std::chrono::milliseconds(indicatorTimeoutMs());
+}
+
+int keyboardRestoreDelayMs() {
+    return std::clamp(configInt("keyboard_restore_delay_ms", 700), 0, 5000);
 }
 
 struct Rgba {
@@ -900,6 +905,15 @@ void removePointerTimer(const SP<CEventLoopTimer>& self) {
         g_pointerRestoreTimers.end());
 }
 
+void removeKeyboardTimer(const SP<CEventLoopTimer>& self) {
+    if (g_pEventLoopManager)
+        g_pEventLoopManager->removeTimer(self);
+
+    g_keyboardRestoreTimers.erase(
+        std::remove_if(g_keyboardRestoreTimers.begin(), g_keyboardRestoreTimers.end(), [&self](const auto& item) { return item.get() == self.get(); }),
+        g_keyboardRestoreTimers.end());
+}
+
 struct TargetSurface {
     PHLWINDOW              window;
     SP<CWLSurfaceResource> surface;
@@ -909,8 +923,6 @@ struct TargetSurface {
 struct WorkspaceSession {
     PHLWINDOWREF root;
     pid_t        pid = -1;
-    std::string  className;
-    std::string  initialClassName;
     PHLWORKSPACE targetWorkspace;
 };
 
@@ -942,6 +954,17 @@ bool sameXWaylandClientFamily(const PHLWINDOW& root, const PHLWINDOW& candidate)
     if (!root->m_class.empty() && root->m_class == candidate->m_class)
         return true;
     return !root->m_initialClass.empty() && root->m_initialClass == candidate->m_initialClass;
+}
+
+bool sameClientFamily(const PHLWINDOW& root, const PHLWINDOW& candidate) {
+    if (!root || !candidate || root == candidate)
+        return false;
+    if (sameXWaylandClientFamily(root, candidate))
+        return true;
+
+    const auto rootPid = root->getPID();
+    const auto candidatePid = candidate->getPID();
+    return rootPid > 0 && candidatePid == rootPid;
 }
 
 PHLWINDOW xwaylandRelatedWindowAt(const PHLWINDOW& root, const Vector2D& globalPos) {
@@ -983,14 +1006,9 @@ bool workspaceSessionMatchesWindow(const WorkspaceSession& session, const PHLWIN
     const auto root = session.root.lock();
     if (root && window == root)
         return true;
-    if (root && sameXWaylandClientFamily(root, window))
+    if (root && sameClientFamily(root, window))
         return true;
-
-    if (!window->m_isX11 || session.pid <= 0 || window->getPID() != session.pid)
-        return false;
-    if (!session.className.empty() && window->m_class == session.className)
-        return true;
-    return !session.initialClassName.empty() && window->m_initialClass == session.initialClassName;
+    return session.pid > 0 && window->getPID() == session.pid;
 }
 
 void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window) {
@@ -1210,6 +1228,7 @@ struct PointerFocusRestore {
 
 struct KeyboardFocusRestore {
     SP<CWLSurfaceResource> previousSurface;
+    bool                   restored = false;
 
     KeyboardFocusRestore() {
         if (!g_pSeatManager)
@@ -1218,10 +1237,40 @@ struct KeyboardFocusRestore {
     }
 
     ~KeyboardFocusRestore() {
-        if (!g_pSeatManager)
+        restoreNow();
+    }
+
+    void restoreNow() {
+        if (restored || !g_pSeatManager)
             return;
+        restored = true;
         g_pSeatManager->sendKeyboardMods(0, 0, 0, 0);
         g_pSeatManager->setKeyboardFocus(previousSurface);
+    }
+
+    void restoreLater(std::chrono::milliseconds delay) {
+        if (restored)
+            return;
+        if (!g_pEventLoopManager || delay.count() <= 0) {
+            restoreNow();
+            return;
+        }
+
+        auto previous = previousSurface;
+        auto timer = makeShared<CEventLoopTimer>(
+            delay,
+            [previous](SP<CEventLoopTimer> self, void*) {
+                if (g_pSeatManager) {
+                    g_pSeatManager->sendKeyboardMods(0, 0, 0, 0);
+                    g_pSeatManager->setKeyboardFocus(previous);
+                }
+                removeKeyboardTimer(self);
+            },
+            nullptr);
+
+        restored = true;
+        g_keyboardRestoreTimers.push_back(timer);
+        g_pEventLoopManager->addTimer(timer);
     }
 
     KeyboardFocusRestore(const KeyboardFocusRestore&) = delete;
@@ -1577,6 +1626,9 @@ SDispatchResult dispatchKeyboard(const std::string& args) {
         g_pSeatManager->sendKeyboardKey(nowMs(), *key, WL_KEYBOARD_KEY_STATE_PRESSED);
         g_pSeatManager->sendKeyboardKey(nowMs(), *key, WL_KEYBOARD_KEY_STATE_RELEASED);
         releaseModifiers();
+        // Modified shortcuts can trigger asynchronous client work, e.g. clipboard paste.
+        if (modifierMask != 0)
+            restore.restoreLater(std::chrono::milliseconds(keyboardRestoreDelayMs()));
         return {.success = true};
     }
 
@@ -1635,8 +1687,6 @@ SDispatchResult dispatchSession(const std::string& args) {
             g_workspaceSessions.push_back({
                 .root = PHLWINDOWREF{root},
                 .pid = root->getPID(),
-                .className = root->m_class,
-                .initialClassName = root->m_initialClass,
                 .targetWorkspace = root->m_workspace,
             });
             existing = std::prev(g_workspaceSessions.end());
@@ -1699,6 +1749,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_session", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:show_indicator", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:indicator_timeout_ms", Hyprlang::INT{30000});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:keyboard_restore_delay_ms", Hyprlang::INT{700});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:cursor_texture_path", Hyprlang::STRING{""});
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
@@ -1714,7 +1765,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.6",
+        .version = "0.3.7",
     };
 }
 
@@ -1726,6 +1777,8 @@ APICALL EXPORT void PLUGIN_EXIT() {
     if (g_pEventLoopManager) {
         for (const auto& timer : g_pointerRestoreTimers)
             g_pEventLoopManager->removeTimer(timer);
+        for (const auto& timer : g_keyboardRestoreTimers)
+            g_pEventLoopManager->removeTimer(timer);
         for (const auto& timer : g_workspaceRestackTimers)
             g_pEventLoopManager->removeTimer(timer);
         if (g_indicatorHideTimer)
@@ -1734,6 +1787,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
             g_pEventLoopManager->removeTimer(g_indicatorAnimationTimer);
     }
     g_pointerRestoreTimers.clear();
+    g_keyboardRestoreTimers.clear();
     g_workspaceRestackTimers.clear();
     g_indicatorHideTimer.reset();
     g_indicatorAnimationTimer.reset();

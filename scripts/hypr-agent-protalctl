@@ -457,12 +457,7 @@ def is_related_window(client: dict, target: dict) -> bool:
         return True
     if not client.get("mapped", True) or client.get("hidden", False):
         return False
-    if client.get("pid") and client.get("pid") == target.get("pid"):
-        if client.get("class") and client.get("class") == target.get("class"):
-            return True
-        if client.get("initialClass") and client.get("initialClass") == target.get("initialClass"):
-            return True
-    return False
+    return bool(client.get("pid") and client.get("pid") == target.get("pid"))
 
 
 def annotate_relation(client: dict, target: dict) -> dict:
