@@ -318,6 +318,7 @@ struct HiddenSession {
     std::string                      className;
     std::string                      initialClassName;
     PHLWORKSPACE                     hiddenWorkspace;
+    PHLWORKSPACE                     restoreWorkspace;
     std::vector<HiddenSessionWindow> movedWindows;
 };
 
@@ -416,8 +417,11 @@ void moveWindowIntoHiddenSession(HiddenSession& session, const PHLWINDOW& window
     if (!g_pCompositor || !session.hiddenWorkspace || !window || !window->m_isMapped || window->m_workspace == session.hiddenWorkspace)
         return;
 
-    if (!hiddenSessionHasWindow(session, window))
-        session.movedWindows.push_back({.originalWindow = PHLWINDOWREF{window}, .originalWorkspace = window->m_workspace});
+    if (!hiddenSessionHasWindow(session, window)) {
+        const auto root = session.root.lock();
+        const auto restoreWorkspace = root && window != root && session.restoreWorkspace ? session.restoreWorkspace : window->m_workspace;
+        session.movedWindows.push_back({.originalWindow = PHLWINDOWREF{window}, .originalWorkspace = restoreWorkspace});
+    }
 
     g_pCompositor->moveWindowToWorkspaceSafe(window, session.hiddenWorkspace);
 }
@@ -827,10 +831,13 @@ SDispatchResult dispatchSession(const std::string& args) {
                 .className = root->m_class,
                 .initialClassName = root->m_initialClass,
                 .hiddenWorkspace = workspace,
+                .restoreWorkspace = root->m_workspace,
             });
             existing = std::prev(g_hiddenSessions.end());
         } else {
             existing->hiddenWorkspace = workspace;
+            if (!existing->restoreWorkspace)
+                existing->restoreWorkspace = root->m_workspace;
         }
 
         syncHiddenSession(*existing);
