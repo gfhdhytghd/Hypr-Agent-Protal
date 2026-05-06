@@ -11,6 +11,7 @@
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
+#include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
@@ -39,6 +40,7 @@ inline HANDLE g_pluginHandle = nullptr;
 namespace {
 
 std::vector<SP<CEventLoopTimer>> g_pointerRestoreTimers;
+std::vector<SP<CEventLoopTimer>> g_workspaceRestackTimers;
 CHyprSignalListener              g_windowOpenListener;
 
 template <typename T>
@@ -393,6 +395,56 @@ bool workspaceSessionMatchesWindow(const WorkspaceSession& session, const PHLWIN
     return !session.initialClassName.empty() && window->m_initialClass == session.initialClassName;
 }
 
+void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window) {
+    if (!g_pCompositor || !root || !window || root == window)
+        return;
+
+    auto& windows = g_pCompositor->m_windows;
+    auto  windowIt = std::find(windows.begin(), windows.end(), window);
+    if (windowIt == windows.end())
+        return;
+
+    const auto moved = *windowIt;
+    windows.erase(windowIt);
+
+    auto rootIt = std::find(windows.begin(), windows.end(), root);
+    if (rootIt == windows.end()) {
+        windows.push_back(moved);
+        return;
+    }
+
+    windows.insert(std::next(rootIt), moved);
+
+    if (g_pHyprRenderer) {
+        g_pHyprRenderer->damageWindow(root);
+        g_pHyprRenderer->damageWindow(window);
+    }
+}
+
+void scheduleRelatedWindowRestack(const PHLWINDOW& root, const PHLWINDOW& window) {
+    if (!g_pEventLoopManager || !root || !window || root == window)
+        return;
+
+    PHLWINDOWREF rootRef{root};
+    PHLWINDOWREF windowRef{window};
+    auto         timer = makeShared<CEventLoopTimer>(
+        std::chrono::milliseconds(75),
+        [rootRef, windowRef](SP<CEventLoopTimer> self, void*) mutable {
+            restackRelatedWindowWithRoot(rootRef.lock(), windowRef.lock());
+
+            if (g_pEventLoopManager)
+                g_pEventLoopManager->removeTimer(self);
+
+            g_workspaceRestackTimers.erase(
+                std::remove_if(g_workspaceRestackTimers.begin(), g_workspaceRestackTimers.end(), [&self](const auto& item) { return item.get() == self.get(); }),
+                g_workspaceRestackTimers.end());
+        },
+        nullptr);
+
+    g_workspaceRestackTimers.push_back(timer);
+    g_pEventLoopManager->addTimer(timer);
+}
+
 void moveRelatedWindowToSessionWorkspace(WorkspaceSession& session, const PHLWINDOW& window) {
     if (!g_pCompositor || !window || !window->m_isMapped)
         return;
@@ -402,10 +454,16 @@ void moveRelatedWindowToSessionWorkspace(WorkspaceSession& session, const PHLWIN
         return;
 
     const auto targetWorkspace = workspaceSessionTarget(session);
-    if (!targetWorkspace || targetWorkspace->inert() || window->m_workspace == targetWorkspace)
+    if (!targetWorkspace || targetWorkspace->inert())
         return;
 
-    g_pCompositor->moveWindowToWorkspaceSafe(window, targetWorkspace);
+    if (window->m_workspace != targetWorkspace)
+        g_pCompositor->moveWindowToWorkspaceSafe(window, targetWorkspace);
+
+    if (root) {
+        restackRelatedWindowWithRoot(root, window);
+        scheduleRelatedWindowRestack(root, window);
+    }
 }
 
 void syncWorkspaceSession(WorkspaceSession& session) {
@@ -879,7 +937,10 @@ APICALL EXPORT void PLUGIN_EXIT() {
     if (g_pEventLoopManager) {
         for (const auto& timer : g_pointerRestoreTimers)
             g_pEventLoopManager->removeTimer(timer);
+        for (const auto& timer : g_workspaceRestackTimers)
+            g_pEventLoopManager->removeTimer(timer);
     }
     g_pointerRestoreTimers.clear();
+    g_workspaceRestackTimers.clear();
     g_pluginHandle = nullptr;
 }
