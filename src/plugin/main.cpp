@@ -542,16 +542,15 @@ void renderAgentIndicator(eRenderStage stage) {
     if (!pointInsideBox(global, windowBox))
         return;
 
-    const double scale = std::max(1.0, static_cast<double>(monitor->m_scale));
     const Vector2D tip{
-        (global.x - monitor->m_position.x) * scale,
-        (global.y - monitor->m_position.y) * scale,
+        global.x - monitor->m_position.x,
+        global.y - monitor->m_position.y,
     };
 
     const bool   clickLike = g_agentPointerAction == "click" || g_agentPointerAction == "doubleclick" || g_agentPointerAction == "double-click" ||
         g_agentPointerAction == "press" || g_agentPointerAction == "down" || g_agentPointerAction == "release" || g_agentPointerAction == "up";
     const double pulse = clickLike ? std::clamp(1.0 - ageMs / 420.0, 0.0, 1.0) : 0.0;
-    const double renderSize = (CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse) * scale;
+    const double renderSize = CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse;
     const auto   texture = codexCursorTexture();
     if (!texture || g_codexCursorTextureSize.x <= 0.0 || g_codexCursorTextureSize.y <= 0.0)
         return;
@@ -563,7 +562,7 @@ void renderAgentIndicator(eRenderStage stage) {
     data.tex = texture;
     data.box = CBox{x, y, renderSize, renderSize};
     data.a = static_cast<float>(fade);
-    data.clipBox = windowBox.copy().translate(-monitor->m_position).scale(scale).round();
+    data.clipBox = windowBox.copy().translate(-monitor->m_position).round();
     g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(std::move(data)));
 }
 
@@ -1768,7 +1767,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.13",
+        .version = "0.3.14",
     };
 }
 
