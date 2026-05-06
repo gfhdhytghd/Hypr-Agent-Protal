@@ -52,12 +52,34 @@ python3 mcp/hypr-agent-protal-mcp.py
 Recommended agent workflow:
 
 1. Call `list_apps` first and select the target app/window.
-2. Call `get_app_state` for semantic state, or `screenshot` with `app` for an
+2. If the requested app is not in `list_apps`, call `launch_app` or `open_app`.
+   Do not guess a shell command outside the MCP tool. The launcher uses
+   `hyprctl dispatch exec`, waits for the Hyprland window, and returns a
+   `target` selector plus the next `get_app_state` hint.
+3. Call `get_app_state` for semantic state, or `screenshot` with `app` for an
    image-only refresh.
-3. Prefer `element_index` from `get_app_state`. When coordinates are needed,
+4. Prefer `element_index` from `get_app_state`. When coordinates are needed,
    use `coordinate_space=screenshot` with screenshot pixels, or
    `coordinate_space=window` with target-window-relative logical coordinates.
-4. Use `computer` with `target` and global `x/y` only as a low-level fallback.
+5. Use `computer` with `target` and global `x/y` only as a low-level fallback.
+
+Apps launched through `launch_app`/`open_app` automatically get accessibility
+environment variables:
+
+```sh
+NO_AT_BRIDGE=0
+QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+GTK_MODULES=gail:atk-bridge
+```
+
+Chromium/Chrome/Electron-like launches also get
+`--force-renderer-accessibility`; browser launches with `new_window=true` add
+`--new-window` and open `about:blank` when no URL is supplied. To open a browser
+directly, use for example:
+
+```json
+{"app": "chromium", "url": "https://google.com", "new_window": true}
+```
 
 Avoid the obsolete `hyprcum` MCP server and namespace. Its tool schema lacks the
 new app-state, screenshot-relative coordinates, related-window session handling,
@@ -66,10 +88,11 @@ cursor-position support, and Codex compatibility aliases.
 The MCP server exposes the compatibility tool `computer` plus Codex-style app-state tools:
 
 - `list_apps`: lists running Hyprland windows with stable selectors, classes, titles, pid, workspace, geometry, and XWayland status.
+- `launch_app` / `open_app`: starts apps through Hyprland, applies accessibility environment/flags, waits for a new window, and returns its selector.
 - `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
 - `click`, `scroll`, `drag`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers.
-- Compatibility aliases: `read_app_state`, `list_windows`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
+- Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
 
 The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch.
 
@@ -112,6 +135,7 @@ The compatibility `computer` tool still exposes these lower-level actions:
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
 - `doctor`: reports AT-SPI/session diagnostics and target accessibility environment hints.
+- `launch`, `launch_app`, `open_app`: launches an app from the compatibility `computer` tool using the same accessibility environment and Chromium/Electron flags as the direct `launch_app` tool.
 - Compatibility action aliases inside `computer`: `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `left_click_drag`, and `get_cursor_position`.
 
 The command-line bridge is also usable directly:

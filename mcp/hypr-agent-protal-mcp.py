@@ -5,6 +5,7 @@ import mimetypes
 import os
 import pathlib
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -14,11 +15,33 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.2"
+SERVER_VERSION = "0.3.3"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
 _ATSPI: Any = None
+A11Y_LAUNCH_ENV = {
+    "NO_AT_BRIDGE": "0",
+    "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "1",
+    "GTK_MODULES": "gail:atk-bridge",
+}
+CHROMIUM_LIKE_EXECUTABLES = {
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+    "chrome",
+    "brave",
+    "brave-browser",
+    "microsoft-edge",
+    "vivaldi",
+    "opera",
+    "electron",
+    "code",
+    "codium",
+    "discord",
+    "slack",
+}
 
 
 def find_ctl() -> pathlib.Path:
@@ -63,6 +86,9 @@ COMPUTER_SCHEMA: dict[str, Any] = {
                 "session",
                 "wait",
                 "doctor",
+                "launch",
+                "launch_app",
+                "open_app",
                 "get_cursor_position",
                 "left_click",
                 "right_click",
@@ -75,6 +101,12 @@ COMPUTER_SCHEMA: dict[str, Any] = {
             "description": "Computer use action to perform.",
         },
         "app": {"type": "string", "description": "Preferred app/window selector for semantic tools and compatibility aliases. Use this instead of target/global coordinates when possible."},
+        "command": {"type": "string", "description": "Command line to launch for launch/open_app actions. Prefer app for simple app names."},
+        "args": {"type": "array", "items": {"type": "string"}, "description": "Additional launch arguments."},
+        "url": {"type": "string", "description": "URL or file target to pass to a launched app, usually with new_window for browsers."},
+        "new_window": {"type": "boolean", "default": True, "description": "For browser launches, request a new window and use about:blank when no URL is supplied."},
+        "reuse_existing": {"type": "boolean", "default": False, "description": "For launch/open_app, return an already running matching app instead of forcing a new launch."},
+        "timeout": {"type": "number", "description": "Seconds to wait for a launched app window to appear."},
         "target": {
             "type": "string",
             "description": "Low-level Hyprland window selector, for example address:0x1234. Prefer app plus screenshot/window-relative coordinates unless you intentionally need global-coordinate fallback.",
@@ -203,10 +235,23 @@ def coordinate_space_property(*, include_global: bool = False) -> dict[str, Any]
 
 READ_ONLY_ANNOTATIONS = {"readOnlyHint": True}
 ACTION_ANNOTATIONS = {"destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
+LAUNCH_ANNOTATIONS = {"destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
 
 
 def tool_definitions() -> list[dict[str, Any]]:
     app = string_property("App name, Hyprland class/title, pid, or address:0x... selector.")
+    launch_app = string_property("App name, desktop id, executable, or simple command to launch, for example chromium, dolphin, org.kde.dolphin.desktop.")
+    launch_schema = object_schema(
+        {
+            "app": launch_app,
+            "command": string_property("Full command line to launch. Prefer app unless custom arguments are needed."),
+            "args": {"type": "array", "items": {"type": "string"}, "description": "Additional command arguments."},
+            "url": string_property("Optional URL or file target to pass to the launched app."),
+            "new_window": {"type": "boolean", "default": True, "description": "For browsers, request a new window and open about:blank when no URL is supplied."},
+            "reuse_existing": {"type": "boolean", "default": False, "description": "Return an already running matching app instead of launching another copy."},
+            "timeout": number_property("Seconds to wait for a Hyprland window to appear. Defaults to 8."),
+        }
+    )
     element_index = string_property("Element index from the last get_app_state result.")
     coordinate = coordinate_schema("(x, y) coordinate in coordinate_space. Defaults to screenshot pixels from get_app_state.")
     start_coordinate = coordinate_schema("(x, y) starting coordinate for a drag in coordinate_space.")
@@ -233,9 +278,21 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "list_apps",
-            "description": "List running Hyprland apps/windows available to hypr-agent-protal. Start here before choosing a target app.",
+            "description": "List running Hyprland apps/windows available to hypr-agent-protal. Start here before choosing a target app. If the desired app is missing, call launch_app/open_app.",
             "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema({}),
+        },
+        {
+            "name": "launch_app",
+            "description": "Launch an app through Hyprland and return the matching window selector. Use this when list_apps does not show the app the user asked to operate. For Chromium/Chrome, url/new_window launches a new accessible browser window.",
+            "annotations": LAUNCH_ANNOTATIONS,
+            "inputSchema": launch_schema,
+        },
+        {
+            "name": "open_app",
+            "description": "Compatibility alias for launch_app.",
+            "annotations": LAUNCH_ANNOTATIONS,
+            "inputSchema": launch_schema,
         },
         {
             "name": "get_app_state",
@@ -635,6 +692,149 @@ def list_apps_text(windows: list[dict[str, Any]]) -> str:
             attrs.append("xwayland")
         lines.append(f"{name} -- {title} [{', '.join(attrs)}]")
     return "\n".join(lines) if lines else "No running Hyprland apps are visible to hypr-agent-protal."
+
+
+def executable_basename(value: str) -> str:
+    return pathlib.Path(value).name.lower()
+
+
+def normalize_desktop_id(value: str) -> str:
+    return value[:-8] if value.endswith(".desktop") else value
+
+
+def resolve_launch_executable(name: str) -> str:
+    aliases = {
+        "chrome": ["google-chrome-stable", "google-chrome", "chromium"],
+        "google-chrome": ["google-chrome-stable", "google-chrome", "chromium"],
+        "chromium": ["chromium", "chromium-browser", "google-chrome-stable", "google-chrome"],
+        "browser": ["chromium", "google-chrome-stable", "google-chrome", "firefox"],
+    }
+    candidates = aliases.get(name.lower(), [name])
+    for candidate in candidates:
+        if shutil.which(candidate):
+            return candidate
+    return name
+
+
+def launch_parts(args: dict[str, Any]) -> tuple[list[str], str]:
+    command = args.get("command")
+    app = args.get("app")
+    if isinstance(command, str) and command.strip():
+        try:
+            parts = shlex.split(command)
+        except ValueError as exc:
+            raise RuntimeError(f"invalid launch command: {exc}") from exc
+        match_query = executable_basename(parts[0]) if parts else command
+    elif isinstance(app, str) and app.strip():
+        app_value = app.strip()
+        if app_value.endswith(".desktop"):
+            parts = ["gtk-launch", normalize_desktop_id(app_value)]
+            match_query = normalize_desktop_id(app_value)
+        else:
+            try:
+                parts = shlex.split(app_value)
+            except ValueError as exc:
+                raise RuntimeError(f"invalid app command: {exc}") from exc
+            if parts:
+                parts[0] = resolve_launch_executable(parts[0])
+            match_query = executable_basename(parts[0]) if parts else app_value
+    else:
+        raise RuntimeError("launch_app requires app or command")
+
+    if not parts:
+        raise RuntimeError("launch_app resolved to an empty command")
+
+    extra_args = args.get("args")
+    if isinstance(extra_args, list):
+        parts.extend(str(item) for item in extra_args if isinstance(item, str))
+
+    url = args.get("url")
+    new_window = args.get("new_window")
+    if not isinstance(new_window, bool):
+        new_window = True
+
+    browser_like = launch_is_chromium_like(parts)
+    if browser_like:
+        if "--force-renderer-accessibility" not in parts:
+            parts.append("--force-renderer-accessibility")
+        if new_window and not any(part == "--new-window" or part.startswith("--app=") for part in parts):
+            parts.append("--new-window")
+        if isinstance(url, str) and url:
+            parts.append(url)
+        elif new_window and not any(not part.startswith("-") for part in parts[1:]):
+            parts.append("about:blank")
+    elif isinstance(url, str) and url:
+        parts.append(url)
+
+    return parts, match_query
+
+
+def launch_is_chromium_like(parts: list[str]) -> bool:
+    if not parts:
+        return False
+    base = executable_basename(parts[0])
+    if base in CHROMIUM_LIKE_EXECUTABLES:
+        return True
+    return any(token in base for token in ("chrom", "brave", "electron", "discord", "slack"))
+
+
+def launch_command_string(parts: list[str]) -> str:
+    env_parts = ["env", *[f"{key}={value}" for key, value in A11Y_LAUNCH_ENV.items()]]
+    return shlex.join([*env_parts, *parts])
+
+
+def hyprctl_exec(command: str) -> str:
+    hyprctl = shutil.which("hyprctl")
+    if not hyprctl:
+        raise RuntimeError("hyprctl not found")
+    proc = subprocess.run([hyprctl, "dispatch", "exec", command], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"hyprctl dispatch exec failed with exit code {proc.returncode}").strip())
+    return proc.stdout.strip()
+
+
+def window_identities(windows: list[dict[str, Any]]) -> set[str]:
+    identities: set[str] = set()
+    for window in windows:
+        for key in ("address", "stableId"):
+            value = str(window.get(key) or "")
+            if value:
+                identities.add(f"{key}:{value}")
+    return identities
+
+
+def window_matches_launch(window: dict[str, Any], query: str) -> bool:
+    normalized = normalize(query)
+    if not normalized:
+        return False
+    fields = [
+        normalize(window.get("class")),
+        normalize(window.get("initialClass")),
+        normalize(window.get("title")),
+        normalize(window.get("initialTitle")),
+        str(window.get("pid") or ""),
+    ]
+    desktop = normalized.removesuffix(".desktop")
+    return any(normalized == field or desktop == field or normalized in field or desktop in field for field in fields if field)
+
+
+def wait_for_launch_window(before_ids: set[str], query: str, timeout: float) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    deadline = time.monotonic() + max(0.0, timeout)
+    latest: list[dict[str, Any]] = []
+    while True:
+        latest = list_hypr_windows()
+        new_windows = [window for window in latest if not (window_identities([window]) & before_ids)]
+        matching_new = [window for window in new_windows if window_matches_launch(window, query)]
+        if matching_new:
+            return matching_new[0], matching_new
+        if new_windows:
+            return new_windows[0], new_windows
+        matching_existing = [window for window in latest if window_matches_launch(window, query)]
+        if matching_existing:
+            return matching_existing[0], []
+        if time.monotonic() >= deadline:
+            return None, []
+        time.sleep(0.2)
 
 
 def remember_snapshot(query: str, snapshot: dict[str, Any]) -> None:
@@ -1625,6 +1825,54 @@ def tool_list_apps(_: dict[str, Any]) -> dict[str, Any]:
     return mcp_text(list_apps_text(windows), structured={"windows": windows})
 
 
+def tool_launch_app(args: dict[str, Any]) -> dict[str, Any]:
+    parts, match_query = launch_parts(args)
+    reuse_existing = args.get("reuse_existing")
+    timeout_value = args.get("timeout", 8)
+    timeout = float(timeout_value) if isinstance(timeout_value, (int, float)) else 8.0
+
+    if reuse_existing:
+        try:
+            existing = resolve_hypr_window(match_query)
+            result = {
+                "ok": True,
+                "reused": True,
+                "app": match_query,
+                "target": window_selector(existing),
+                "window": existing,
+                "next": f'Call get_app_state with app="{window_selector(existing)}" or app="{match_query}".',
+            }
+            return mcp_text(json.dumps(result, ensure_ascii=False), structured=result)
+        except Exception:
+            pass
+
+    before = list_hypr_windows()
+    before_ids = window_identities(before)
+    command = launch_command_string(parts)
+    output = hyprctl_exec(command)
+    window, new_windows = wait_for_launch_window(before_ids, match_query, timeout)
+    result: dict[str, Any] = {
+        "ok": True,
+        "reused": False,
+        "app": match_query,
+        "command": command,
+        "argv": parts,
+        "hyprctlOutput": output,
+        "accessibility": {
+            "environment": A11Y_LAUNCH_ENV,
+            "chromiumLikeFlagsApplied": launch_is_chromium_like(parts),
+        },
+        "newWindows": new_windows,
+    }
+    if window is not None:
+        result["target"] = window_selector(window)
+        result["window"] = window
+        result["next"] = f'Call get_app_state with app="{window_selector(window)}" or app="{match_query}".'
+    else:
+        result["warning"] = "No Hyprland window appeared before timeout; use list_apps to inspect current windows."
+    return mcp_text(json.dumps(result, ensure_ascii=False), structured=result)
+
+
 def tool_get_app_state(args: dict[str, Any]) -> dict[str, Any]:
     app = args.get("app")
     if not isinstance(app, str) or not app:
@@ -1902,6 +2150,8 @@ def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
 SEMANTIC_TOOLS = {
     "list_apps": tool_list_apps,
     "list_windows": tool_list_apps,
+    "launch_app": tool_launch_app,
+    "open_app": tool_launch_app,
     "get_app_state": tool_get_app_state,
     "read_app_state": tool_get_app_state,
     "screenshot": tool_screenshot,
@@ -1930,6 +2180,9 @@ SEMANTIC_TOOLS = {
 
 def computer(args: dict[str, Any]) -> dict[str, Any]:
     action = str(args.get("action") or "")
+
+    if action in {"launch", "launch_app", "open_app"}:
+        return tool_launch_app(args)
 
     app = args.get("app")
     if isinstance(app, str) and app:
