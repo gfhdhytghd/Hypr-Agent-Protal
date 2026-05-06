@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.21"
+SERVER_VERSION = "0.3.22"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -1996,44 +1996,10 @@ def element_role_is_tab_like(role: str) -> bool:
     return "tab" in words and "table" not in words
 
 
-def element_role_is_menu(role: str) -> bool:
-    return role == "menu"
-
-
-def element_role_is_menu_item(role: str) -> bool:
-    return role in {"menu item", "check menu item", "radio menu item"}
-
-
-def snapshot_has_open_menu_from(snapshot: dict[str, Any], menu_element: dict[str, Any]) -> bool:
-    menu_rect = element_visible_rect(snapshot, menu_element)
-    if menu_rect is None:
-        return False
-    menu_bottom = menu_rect["y"] + menu_rect["height"]
-    menu_left = menu_rect["x"]
-    menu_right = menu_rect["x"] + menu_rect["width"]
-    for element in snapshot.get("elements") or []:
-        if not isinstance(element, dict) or not element_is_visible(snapshot, element):
-            continue
-        role = element_role(element)
-        rect = element_visible_rect(snapshot, element)
-        if rect is None:
-            continue
-        if element_role_is_menu_item(role):
-            return True
-        if element_role_is_menu(role) and element.get("index") != menu_element.get("index"):
-            horizontally_related = rect["x"] <= menu_right + 320.0 and rect["x"] + rect["width"] >= menu_left - 320.0
-            below_menu_bar = rect["y"] >= menu_bottom + 4.0
-            if horizontally_related and below_menu_bar:
-                return True
-    return False
-
-
-def menu_click_warning(menu_element: dict[str, Any]) -> str:
-    name = str(menu_element.get("name") or menu_element.get("automationId") or menu_element.get("index") or "menu")
-    return (
-        f'Clicked menu "{name}", but no menu items appeared in the refreshed app state. '
-        "Retry the visible menu target or use screenshot/window-relative coordinates, then refresh get_app_state before choosing an item."
-    )
+def element_role_is_actionable(role: str) -> bool:
+    if role in {"push button", "button", "toggle button", "menu item", "check menu item", "radio menu item"}:
+        return True
+    return "button" in role or role.endswith("menu item")
 
 
 def text_is_bulk_paste_candidate(text: str) -> bool:
@@ -2066,12 +2032,13 @@ def prepare_grid_bulk_paste(snapshot: dict[str, Any], text: str) -> dict[str, An
 def ui_hints_for_elements(snapshot: dict[str, Any], elements: list[dict[str, Any]]) -> dict[str, Any]:
     hints: dict[str, Any] = {
         "notes": [
-            "AT-SPI roles are toolkit descriptions, not visual intent. A controlType of menu means a menu entry reported by the app/toolkit; it is not the same as a tab/ribbon page even when the visible label matches.",
+            "AT-SPI roles are toolkit descriptions, not visual intent. A controlType of menu can be a classic menu, an app command label, or a ribbon/notebookbar page selector depending on the toolkit.",
             "When the requested action is to switch a tab/ribbon/page, prefer visible elements whose controlType contains tab/page tab or toolbar controls exposed after that tab. If no tab element is exposed, use screenshot/window-relative coordinates on the visible tab label, then refresh get_app_state.",
         ],
         "visibleMenus": [],
         "visibleTabs": [],
         "visibleToolbars": [],
+        "visibleActions": [],
     }
     for element in elements:
         if not isinstance(element, dict) or not element_is_visible(snapshot, element):
@@ -2083,7 +2050,9 @@ def ui_hints_for_elements(snapshot: dict[str, Any], elements: list[dict[str, Any
             hints["visibleTabs"].append(element_hint_record(element))
         elif role in {"tool bar", "toolbar"} or "tool bar" in role or "toolbar" in role:
             hints["visibleToolbars"].append(element_hint_record(element))
-    for key in ("visibleMenus", "visibleTabs", "visibleToolbars"):
+        elif element_role_is_actionable(role) and (element.get("name") or element.get("value") or element.get("automationId")):
+            hints["visibleActions"].append(element_hint_record(element))
+    for key in ("visibleMenus", "visibleTabs", "visibleToolbars", "visibleActions"):
         if len(hints[key]) > 24:
             hints[key] = hints[key][:24]
             hints[f"{key}Truncated"] = True
@@ -2625,16 +2594,17 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
             )
     elif snapshot.get("relatedWindowsError"):
         lines.extend(["", f"Related windows: unavailable. {snapshot.get('relatedWindowsError')}"])
-    action_warnings = [str(warning) for warning in snapshot.get("actionWarnings") or [] if warning]
-    if action_warnings:
-        lines.extend(["", "Action warnings:"])
-        lines.extend(f"- {warning}" for warning in action_warnings)
     ui_hints = snapshot.get("uiHints") or {}
     hint_notes = ui_hints.get("notes") or []
     if hint_notes:
         lines.extend(["", "UI hints:"])
         lines.extend(f"- {note}" for note in hint_notes)
-    for label, key in (("Visible tab-like controls", "visibleTabs"), ("Visible menu controls", "visibleMenus"), ("Visible toolbars", "visibleToolbars")):
+    for label, key in (
+        ("Visible tab-like controls", "visibleTabs"),
+        ("Visible menu/toolkit command controls", "visibleMenus"),
+        ("Visible toolbar containers", "visibleToolbars"),
+        ("Visible actionable controls", "visibleActions"),
+    ):
         controls = ui_hints.get(key) or []
         if controls:
             lines.append(f"{label}:")
@@ -2811,15 +2781,10 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
         x, y = point
         coordinate_space = args.get("coordinate_space") or "screenshot"
 
-    menu_element = element if element is not None and button == "left" and click_count == 1 and element_role_is_menu(element_role(element)) else None
-
     if element is not None and button == "left" and click_count == 1 and element_has_primary_atspi_action(element):
         control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
         if atspi_do_action_isolated(snapshot, element):
-            time.sleep(0.12)
-            after = build_app_snapshot(app)
-            if menu_element is None or snapshot_has_open_menu_from(after, menu_element):
-                return mcp_snapshot_result(after)
+            return mcp_snapshot_result(build_app_snapshot(app))
 
     global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
     action = "doubleclick" if click_count > 1 and button == "left" else "click"
@@ -2831,15 +2796,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
             time.sleep(0.12)
     if action == "doubleclick":
         call_ctl(["pointer", "--json", target, str(global_x), str(global_y), "doubleclick", button])
-    time.sleep(0.12 if menu_element is not None else 0.0)
-    after = build_app_snapshot(app)
-    if menu_element is not None and not snapshot_has_open_menu_from(after, menu_element):
-        call_ctl(["pointer", "--json", target, str(global_x), str(global_y), "click", button])
-        time.sleep(0.18)
-        after = build_app_snapshot(app)
-        if not snapshot_has_open_menu_from(after, menu_element):
-            after["actionWarnings"] = [*([str(w) for w in after.get("actionWarnings") or []]), menu_click_warning(menu_element)]
-    return mcp_snapshot_result(after)
+    return mcp_snapshot_result(build_app_snapshot(app))
 
 
 def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:

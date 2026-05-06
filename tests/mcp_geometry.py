@@ -142,25 +142,14 @@ def main() -> int:
     assert hints["visibleTabs"][0]["index"] == 2
     assert all(item["index"] != 4 for item in hints["visibleTabs"])
     assert hints["visibleToolbars"][0]["index"] == 3
-    assert "not the same as a tab" in hints["notes"][0]
-    closed_menu = {"index": 1, "source": "atspi", "controlType": "menu", "name": "Insert", "frame": {"x": 100.0, "y": 0.0, "width": 80.0, "height": 36.0}}
-    assert mcp.snapshot_has_open_menu_from({"screenshot": {"width": 1000, "height": 600}, "elements": [closed_menu]}, closed_menu) is False
-    open_menu_item = {
-        "screenshot": {"width": 1000, "height": 600},
-        "elements": [
-            closed_menu,
-            {"index": 5, "source": "atspi", "controlType": "menu item", "name": "Chart", "frame": {"x": 100.0, "y": 40.0, "width": 200.0, "height": 32.0}},
+    assert "can be a classic menu" in hints["notes"][0]
+    action_hints = mcp.ui_hints_for_elements(
+        hints_snapshot,
+        [
+            {"index": 5, "source": "atspi", "controlType": "push button", "name": "Chart", "frame": {"x": 100.0, "y": 40.0, "width": 80.0, "height": 32.0}},
         ],
-    }
-    assert mcp.snapshot_has_open_menu_from(open_menu_item, closed_menu) is True
-    open_submenu = {
-        "screenshot": {"width": 1000, "height": 600},
-        "elements": [
-            closed_menu,
-            {"index": 6, "source": "atspi", "controlType": "menu", "name": "Recent", "frame": {"x": 100.0, "y": 40.0, "width": 240.0, "height": 300.0}},
-        ],
-    }
-    assert mcp.snapshot_has_open_menu_from(open_submenu, closed_menu) is True
+    )
+    assert action_hints["visibleActions"][0]["index"] == 5
     assert mcp.text_is_bulk_paste_candidate("A\tB\n1\t2") is True
     assert mcp.text_is_bulk_paste_candidate("short") is False
     assert mcp.snapshot_has_grid_target({"elements": [{"controlType": "table cell"}]}) is True
