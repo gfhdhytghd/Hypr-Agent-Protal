@@ -76,14 +76,14 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "text": {"type": "string", "description": "Text for type/copy_text/paste_text actions."},
         "show_cursor": {
             "type": "boolean",
-            "description": "For screenshot, draw the cursor indicator on the returned image.",
-            "default": True,
+            "description": "For screenshot debugging, draw the cursor indicator on the returned image. The real desktop indicator is rendered by the Hyprland plugin.",
+            "default": False,
         },
         "cursor_source": {
             "type": "string",
             "enum": ["auto", "agent", "hyprland", "none"],
-            "description": "For screenshot, choose the cursor indicator source. auto prefers the last background pointer coordinate.",
-            "default": "auto",
+            "description": "For screenshot debugging, choose the cursor indicator source. auto prefers the last background pointer coordinate.",
+            "default": "none",
         },
         "method": {
             "type": "string",
@@ -573,11 +573,14 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
         target = args.get("target")
         if isinstance(target, str) and target:
             cmd.extend(["--target", target])
-        if args.get("show_cursor") is False:
+        show_cursor = args.get("show_cursor")
+        if show_cursor is False:
             cmd.append("--no-cursor")
         cursor_source = args.get("cursor_source")
         if isinstance(cursor_source, str) and cursor_source:
             cmd.extend(["--cursor-source", cursor_source])
+        elif show_cursor is True:
+            cmd.extend(["--cursor-source", "auto"])
         info = call_ctl(cmd)
         data = info.pop("pngBase64")
         text = json.dumps(info, ensure_ascii=False)
@@ -718,7 +721,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
             req_id,
             {
                 "protocolVersion": "2025-06-18",
-                "serverInfo": {"name": "hypr-agent-protal", "version": "0.2.2"},
+                "serverInfo": {"name": "hypr-agent-protal", "version": "0.2.3"},
                 "capabilities": {"tools": {"listChanged": False}},
             },
         )

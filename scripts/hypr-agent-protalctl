@@ -173,7 +173,7 @@ def draw_cursor_indicator(canvas: bytearray, width: int, height: int, x: int, y:
         blend_rect(canvas, width, height, x + cx * unit, y + cy * unit, unit, (18, 18, 18, 245))
 
 
-def render_session_png(session: dict, *, cursor_source: str = "auto", cursor_path: pathlib.Path | None = None) -> tuple[bytes, dict]:
+def render_session_png(session: dict, *, cursor_source: str = "none", cursor_path: pathlib.Path | None = None) -> tuple[bytes, dict]:
     monitors = [m for m in session.get("monitors", []) if m.get("artifactPath") and m.get("artifactWidth") and m.get("artifactHeight")]
     if not monitors:
         raise RuntimeError("no rendered monitor artifacts in screenshot session")
@@ -461,8 +461,8 @@ def build_parser() -> argparse.ArgumentParser:
     shot.add_argument(
         "--cursor-source",
         choices=["auto", "agent", "hyprland", "none"],
-        default="auto",
-        help="cursor indicator source; auto prefers the last background pointer coordinate",
+        default="none",
+        help="debug PNG cursor indicator source; auto prefers the last background pointer coordinate",
     )
     shot.set_defaults(func=screenshot)
 

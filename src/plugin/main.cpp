@@ -12,6 +12,7 @@
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/pass/RectPassElement.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
@@ -19,6 +20,7 @@
 
 #include <algorithm>
 #include <any>
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cctype>
@@ -41,7 +43,33 @@ namespace {
 
 std::vector<SP<CEventLoopTimer>> g_pointerRestoreTimers;
 std::vector<SP<CEventLoopTimer>> g_workspaceRestackTimers;
+SP<CEventLoopTimer>              g_indicatorHideTimer;
+SP<CEventLoopTimer>              g_indicatorAnimationTimer;
 CHyprSignalListener              g_windowOpenListener;
+CHyprSignalListener              g_renderStageListener;
+std::optional<Vector2D>          g_agentPointerPosition;
+std::optional<Time::steady_tp>   g_agentPointerUpdated;
+std::string                      g_agentPointerAction;
+
+constexpr std::array<std::string_view, 17> CODEX_CURSOR_BITMAP = {
+    "X              ",
+    "XX             ",
+    "XOX            ",
+    "XOOX           ",
+    "XOOOX          ",
+    "XOOOOX         ",
+    "XOOOOOX        ",
+    "XOOOOOOX       ",
+    "XOOOOOOOX      ",
+    "XOOOOOOOOX     ",
+    "XOOOOXXXXX     ",
+    "XOOX           ",
+    "XOXX           ",
+    "XX XX          ",
+    "X   XX         ",
+    "     XX        ",
+    "      XX       ",
+};
 
 template <typename T>
 T configValue(const std::string& name, T fallback) {
@@ -58,6 +86,213 @@ T configValue(const std::string& name, T fallback) {
 
 bool configBool(const std::string& suffix, bool fallback) {
     return configValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback ? 1 : 0) != 0;
+}
+
+int configInt(const std::string& suffix, int fallback) {
+    return static_cast<int>(configValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback));
+}
+
+CBox agentIndicatorBounds(const Vector2D& globalPos) {
+    return CBox{globalPos.x - 14.0, globalPos.y - 14.0, 76.0, 76.0};
+}
+
+void damageAgentIndicator() {
+    if (!g_pHyprRenderer || !g_agentPointerPosition)
+        return;
+
+    g_pHyprRenderer->damageBox(agentIndicatorBounds(*g_agentPointerPosition));
+}
+
+Time::steady_dur indicatorTimeout() {
+    return std::chrono::milliseconds(std::clamp(configInt("indicator_timeout_ms", 2600), 250, 15000));
+}
+
+bool cursorBitmapCellFilled(int x, int y) {
+    if (y < 0 || y >= static_cast<int>(CODEX_CURSOR_BITMAP.size()))
+        return false;
+    const auto row = CODEX_CURSOR_BITMAP[static_cast<size_t>(y)];
+    if (x < 0 || x >= static_cast<int>(row.size()))
+        return false;
+    return row[static_cast<size_t>(x)] != ' ';
+}
+
+void addIndicatorRect(const CBox& box, const CHyprColor& color, int round = 0) {
+    if (!g_pHyprRenderer || box.w <= 0.0 || box.h <= 0.0 || color.a <= 0.0F)
+        return;
+
+    CRectPassElement::SRectData data;
+    data.box   = box;
+    data.color = color;
+    data.round = round;
+    g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(data));
+}
+
+void addIndicatorCircle(const Vector2D& center, double diameter, const CHyprColor& color) {
+    if (diameter <= 0.0)
+        return;
+
+    addIndicatorRect(CBox{center.x - diameter / 2.0, center.y - diameter / 2.0, diameter, diameter}, color, static_cast<int>(std::lround(diameter / 2.0)));
+}
+
+void renderCodexCursorBitmap(const Vector2D& tip, double monitorScale, double fade) {
+    const double unit = std::max(1.0, 1.65 * monitorScale);
+    const auto   fill = CHyprColor(0.98F, 0.97F, 1.00F, static_cast<float>(0.96 * fade));
+    const auto   outline = CHyprColor(0.42F, 0.18F, 0.58F, static_cast<float>(0.82 * fade));
+    const auto   shadow = CHyprColor(0.0F, 0.0F, 0.0F, static_cast<float>(0.20 * fade));
+
+    const auto drawCell = [&](int x, int y, const Vector2D& offset, const CHyprColor& color, double expand = 0.35) {
+        addIndicatorRect(
+            CBox{tip.x + offset.x + x * unit, tip.y + offset.y + y * unit, unit + expand * monitorScale, unit + expand * monitorScale},
+            color);
+    };
+
+    const int rows = static_cast<int>(CODEX_CURSOR_BITMAP.size());
+    for (int y = 0; y < rows; ++y) {
+        const int cols = static_cast<int>(CODEX_CURSOR_BITMAP[static_cast<size_t>(y)].size());
+        for (int x = 0; x < cols; ++x) {
+            if (cursorBitmapCellFilled(x, y))
+                drawCell(x, y, Vector2D{1.4 * monitorScale, 2.0 * monitorScale}, shadow, 0.15);
+        }
+    }
+
+    for (int y = -1; y <= rows; ++y) {
+        for (int x = -1; x <= 16; ++x) {
+            if (cursorBitmapCellFilled(x, y))
+                continue;
+
+            bool adjacent = false;
+            for (int oy = -1; oy <= 1 && !adjacent; ++oy) {
+                for (int ox = -1; ox <= 1; ++ox) {
+                    if (cursorBitmapCellFilled(x + ox, y + oy)) {
+                        adjacent = true;
+                        break;
+                    }
+                }
+            }
+
+            if (adjacent)
+                drawCell(x, y, {}, outline, 0.15);
+        }
+    }
+
+    for (int y = 0; y < rows; ++y) {
+        const int cols = static_cast<int>(CODEX_CURSOR_BITMAP[static_cast<size_t>(y)].size());
+        for (int x = 0; x < cols; ++x) {
+            if (cursorBitmapCellFilled(x, y))
+                drawCell(x, y, {}, fill, 0.15);
+        }
+    }
+}
+
+void renderAgentIndicator(eRenderStage stage) {
+    if (stage != RENDER_LAST_MOMENT || !configBool("show_indicator", true) || !g_agentPointerPosition || !g_agentPointerUpdated || !g_pHyprOpenGL)
+        return;
+
+    const auto monitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    if (!monitor)
+        return;
+
+    const auto global = *g_agentPointerPosition;
+    if (global.x < monitor->m_position.x - 64.0 || global.y < monitor->m_position.y - 64.0 ||
+        global.x > monitor->m_position.x + monitor->m_size.x + 64.0 || global.y > monitor->m_position.y + monitor->m_size.y + 64.0)
+        return;
+
+    const auto   now = Time::steadyNow();
+    const double ageMs = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(now - *g_agentPointerUpdated).count());
+    const double timeoutMs = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(indicatorTimeout()).count());
+    if (ageMs > timeoutMs + 50.0)
+        return;
+
+    const double fade = std::clamp((timeoutMs - ageMs) / 450.0, 0.0, 1.0);
+    if (fade <= 0.0)
+        return;
+
+    const double scale = std::max(1.0, static_cast<double>(monitor->m_scale));
+    const Vector2D tip{
+        (global.x - monitor->m_position.x) * scale,
+        (global.y - monitor->m_position.y) * scale,
+    };
+
+    const bool   clickLike = g_agentPointerAction == "click" || g_agentPointerAction == "doubleclick" || g_agentPointerAction == "double-click" ||
+        g_agentPointerAction == "press" || g_agentPointerAction == "down" || g_agentPointerAction == "release" || g_agentPointerAction == "up";
+    const double pulse = std::clamp(1.0 - ageMs / (clickLike ? 420.0 : 620.0), 0.0, 1.0);
+    const double breathe = 0.5 + 0.5 * std::sin(ageMs / 165.0);
+    const Vector2D haloCenter = tip + Vector2D{12.0 * scale, 10.5 * scale};
+    const double outerDiameter = (35.0 + 8.0 * pulse + 2.0 * breathe) * scale;
+    const double innerDiameter = std::max(1.0, outerDiameter - 9.0 * scale);
+
+    addIndicatorCircle(haloCenter + Vector2D{1.8 * scale, 2.4 * scale}, outerDiameter + 1.5 * scale,
+                       CHyprColor(0.0F, 0.0F, 0.0F, static_cast<float>(0.18 * fade)));
+    addIndicatorCircle(haloCenter, outerDiameter + 2.0 * scale, CHyprColor(1.0F, 0.96F, 1.0F, static_cast<float>((0.24 + 0.16 * pulse) * fade)));
+    addIndicatorCircle(haloCenter, outerDiameter, CHyprColor(0.73F, 0.39F, 0.96F, static_cast<float>((0.38 + 0.22 * pulse) * fade)));
+    addIndicatorCircle(haloCenter, innerDiameter, CHyprColor(0.92F, 0.64F, 1.0F, static_cast<float>(0.20 * fade)));
+
+    renderCodexCursorBitmap(tip, scale, fade);
+}
+
+void stopIndicatorTimer(SP<CEventLoopTimer>& timer) {
+    if (timer && g_pEventLoopManager)
+        g_pEventLoopManager->removeTimer(timer);
+    timer.reset();
+}
+
+void scheduleIndicatorAnimation() {
+    if (!g_pEventLoopManager || g_indicatorAnimationTimer)
+        return;
+
+    g_indicatorAnimationTimer = makeShared<CEventLoopTimer>(
+        std::chrono::milliseconds(33),
+        [](SP<CEventLoopTimer> self, void*) {
+            if (!g_agentPointerPosition || !g_pEventLoopManager) {
+                if (g_pEventLoopManager)
+                    g_pEventLoopManager->removeTimer(self);
+                if (g_indicatorAnimationTimer.get() == self.get())
+                    g_indicatorAnimationTimer.reset();
+                return;
+            }
+
+            damageAgentIndicator();
+            self->updateTimeout(std::chrono::milliseconds(33));
+        },
+        nullptr);
+    g_pEventLoopManager->addTimer(g_indicatorAnimationTimer);
+}
+
+void scheduleIndicatorHide() {
+    if (!g_pEventLoopManager)
+        return;
+
+    stopIndicatorTimer(g_indicatorHideTimer);
+    g_indicatorHideTimer = makeShared<CEventLoopTimer>(
+        indicatorTimeout(),
+        [](SP<CEventLoopTimer> self, void*) {
+            damageAgentIndicator();
+            g_agentPointerPosition.reset();
+            g_agentPointerUpdated.reset();
+            g_agentPointerAction.clear();
+
+            if (g_pEventLoopManager)
+                g_pEventLoopManager->removeTimer(self);
+            if (g_indicatorHideTimer.get() == self.get())
+                g_indicatorHideTimer.reset();
+            stopIndicatorTimer(g_indicatorAnimationTimer);
+        },
+        nullptr);
+    g_pEventLoopManager->addTimer(g_indicatorHideTimer);
+}
+
+void showAgentIndicator(const Vector2D& globalPos, std::string_view action) {
+    if (!configBool("show_indicator", true))
+        return;
+
+    damageAgentIndicator();
+    g_agentPointerPosition = globalPos;
+    g_agentPointerUpdated = Time::steadyNow();
+    g_agentPointerAction = std::string(action);
+    damageAgentIndicator();
+
+    scheduleIndicatorHide();
+    scheduleIndicatorAnimation();
 }
 
 std::string trim(std::string_view value) {
@@ -682,6 +917,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
 
     if (action == "move" || action == "motion") {
         g_pSeatManager->sendPointerFrame();
+        showAgentIndicator(Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -692,6 +928,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         if (!dx || !dy)
             return {.success = false, .error = "scroll dx/dy must be finite numbers"};
         sendPointerScroll(*dx, *dy);
+        showAgentIndicator(Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -700,6 +937,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
+        showAgentIndicator(Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -710,6 +948,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
             g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         }
         g_pSeatManager->sendPointerFrame();
+        showAgentIndicator(Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -717,6 +956,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
     if (action == "press" || action == "down") {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerFrame();
+        showAgentIndicator(Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -724,6 +964,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
     if (action == "release" || action == "up") {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
+        showAgentIndicator(Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -914,33 +1155,46 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_keyboard", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_screenshot", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_session", Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:show_indicator", Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:indicator_timeout_ms", Hyprlang::INT{2600});
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:keyboard", dispatchKeyboard);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:screenshot", dispatchScreenshot);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:session", dispatchSession);
     g_windowOpenListener = Event::bus()->m_events.window.open.listen([](PHLWINDOW window) { handleWorkspaceSessionWindowOpen(window); });
+    g_renderStageListener = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) { renderAgentIndicator(stage); });
     HyprlandAPI::reloadConfig();
 
     return {
         .name = "hypr-agent-protal",
-        .description = "Background screenshot, pointer, keyboard, and workspace guard primitives for Hyprland agents",
+        .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.2.1",
+        .version = "0.2.3",
     };
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
     g_workspaceSessions.clear();
     g_windowOpenListener.reset();
+    g_renderStageListener.reset();
 
     if (g_pEventLoopManager) {
         for (const auto& timer : g_pointerRestoreTimers)
             g_pEventLoopManager->removeTimer(timer);
         for (const auto& timer : g_workspaceRestackTimers)
             g_pEventLoopManager->removeTimer(timer);
+        if (g_indicatorHideTimer)
+            g_pEventLoopManager->removeTimer(g_indicatorHideTimer);
+        if (g_indicatorAnimationTimer)
+            g_pEventLoopManager->removeTimer(g_indicatorAnimationTimer);
     }
     g_pointerRestoreTimers.clear();
     g_workspaceRestackTimers.clear();
+    g_indicatorHideTimer.reset();
+    g_indicatorAnimationTimer.reset();
+    g_agentPointerPosition.reset();
+    g_agentPointerUpdated.reset();
+    g_agentPointerAction.clear();
     g_pluginHandle = nullptr;
 }
