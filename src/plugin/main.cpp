@@ -1028,7 +1028,6 @@ void constrainRelatedWindowFocusAndLayer(const PHLWINDOW& window) {
     window->m_noInitialFocus = true;
     window->m_createdOverFullscreen = false;
     window->m_suppressedEvents |= Desktop::View::SUPPRESS_ACTIVATE | Desktop::View::SUPPRESS_ACTIVATE_FOCUSONLY;
-    window->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
 }
 
 void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window) {
@@ -1835,7 +1834,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.41",
+        .version = "0.3.42",
     };
 }
 
