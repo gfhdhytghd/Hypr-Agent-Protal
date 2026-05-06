@@ -92,7 +92,7 @@ plugin {
     allow_keyboard = 1
     allow_session = 1
     show_indicator = 1
-    indicator_timeout_ms = 12000
+    indicator_timeout_ms = 30000
   }
 }
 ```

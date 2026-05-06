@@ -49,7 +49,7 @@ def main() -> int:
     tools = lines[1]["result"]["tools"]
     assert len(tools) == 1
     assert tools[0]["name"] == "computer"
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.2.4"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.2.5"
     actions = set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait"]:
         assert action in actions

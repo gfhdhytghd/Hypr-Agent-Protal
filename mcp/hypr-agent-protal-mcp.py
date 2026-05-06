@@ -721,7 +721,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
             req_id,
             {
                 "protocolVersion": "2025-06-18",
-                "serverInfo": {"name": "hypr-agent-protal", "version": "0.2.4"},
+                "serverInfo": {"name": "hypr-agent-protal", "version": "0.2.5"},
                 "capabilities": {"tools": {"listChanged": False}},
             },
         )
