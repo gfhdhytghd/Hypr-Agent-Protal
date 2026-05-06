@@ -61,6 +61,31 @@ def main() -> int:
         assert small_metadata["sourceHeight"] == 10
         assert small_metadata["modelDownsample"]["enabled"] is True
 
+        hidpi_artifact = tmp / "hidpi.rgba"
+        hidpi_artifact.write_bytes(bytes([200, 200, 200, 255]) * 400)
+        hidpi_session = {
+            "cursorPosition": {"x": 4.0, "y": 5.0},
+            "windows": [],
+            "monitors": [
+                {
+                    "name": "hidpi",
+                    "geometry": {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0},
+                    "scale": 2.0,
+                    "artifactPath": str(hidpi_artifact),
+                    "artifactWidth": 20,
+                    "artifactHeight": 20,
+                }
+            ],
+        }
+        _, logical_metadata = ctl.render_session_png(hidpi_session, model_resolution="logical")
+        assert logical_metadata["width"] == 10
+        assert logical_metadata["height"] == 10
+        assert logical_metadata["sourceWidth"] == 20
+        assert logical_metadata["sourceHeight"] == 20
+        assert logical_metadata["scaleX"] == 1.0
+        assert logical_metadata["scaleY"] == 1.0
+        assert logical_metadata["modelDownsample"]["mode"] == "logical"
+
     return 0
 
 

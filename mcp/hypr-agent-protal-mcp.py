@@ -15,10 +15,10 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.25"
+SERVER_VERSION = "0.3.26"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
-DEFAULT_MODEL_SCREENSHOT_MAX_DIMENSION = 1024
+DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
 
 _ATSPI_INIT_ERROR: str | None | bool = None
 _ATSPI: Any = None
@@ -708,20 +708,28 @@ def mcp_snapshot_result(snapshot: dict[str, Any]) -> dict[str, Any]:
     return {"content": content, "structuredContent": structured, "isError": False}
 
 
+def model_screenshot_resolution() -> str:
+    raw = normalize(os.environ.get("HYPR_AGENT_PROTAL_MODEL_RESOLUTION") or DEFAULT_MODEL_SCREENSHOT_RESOLUTION)
+    if raw in {"full", "native", "hidpi"}:
+        return "full"
+    return "logical"
+
+
 def model_screenshot_max_dimension() -> int:
     raw = os.environ.get("HYPR_AGENT_PROTAL_MODEL_MAX_DIMENSION")
-    if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = DEFAULT_MODEL_SCREENSHOT_MAX_DIMENSION
-        return max(0, value)
-    return DEFAULT_MODEL_SCREENSHOT_MAX_DIMENSION
+    if not raw:
+        return 0
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 0
 
 
 def screenshot_command_base() -> list[str]:
     max_dimension = model_screenshot_max_dimension()
-    cmd = ["screenshot", "--base64", "--max-dimension", str(max_dimension)]
+    cmd = ["screenshot", "--base64", "--model-resolution", model_screenshot_resolution()]
+    if max_dimension > 0:
+        cmd.extend(["--max-dimension", str(max_dimension)])
     return cmd
 
 

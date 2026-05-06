@@ -97,11 +97,15 @@ def resize_rgba_bilinear(src: bytes, src_w: int, src_h: int, dst_w: int, dst_h: 
     return bytes(dst)
 
 
-def model_output_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
-    if max_dimension <= 0 or max(width, height) <= max_dimension:
-        return width, height
-    scale = max_dimension / max(width, height)
-    return max(1, round(width * scale)), max(1, round(height * scale))
+def model_output_dimensions(width: int, height: int, logical_width: float, logical_height: float, mode: str, max_dimension: int) -> tuple[int, int]:
+    if mode == "logical" and logical_width > 0 and logical_height > 0:
+        width = max(1, round(logical_width))
+        height = max(1, round(logical_height))
+    if max_dimension > 0 and max(width, height) > max_dimension:
+        scale = max_dimension / max(width, height)
+        width = max(1, round(width * scale))
+        height = max(1, round(height * scale))
+    return width, height
 
 
 def state_root(output_dir: str | None = None) -> pathlib.Path:
@@ -215,7 +219,14 @@ def draw_cursor_indicator(canvas: bytearray, width: int, height: int, x: int, y:
         blend_rect(canvas, width, height, x + cx * unit, y + cy * unit, unit, (18, 18, 18, 245))
 
 
-def render_session_png(session: dict, *, cursor_source: str = "none", cursor_path: pathlib.Path | None = None, max_dimension: int = 0) -> tuple[bytes, dict]:
+def render_session_png(
+    session: dict,
+    *,
+    cursor_source: str = "none",
+    cursor_path: pathlib.Path | None = None,
+    model_resolution: str = "full",
+    max_dimension: int = 0,
+) -> tuple[bytes, dict]:
     monitors = [m for m in session.get("monitors", []) if m.get("artifactPath") and m.get("artifactWidth") and m.get("artifactHeight")]
     if not monitors:
         raise RuntimeError("no rendered monitor artifacts in screenshot session")
@@ -273,15 +284,15 @@ def render_session_png(session: dict, *, cursor_source: str = "none", cursor_pat
     source_w = out_w
     source_h = out_h
     source_scale = out_scale
-    model_w, model_h = model_output_dimensions(out_w, out_h, max_dimension)
+    logical_width = max_x - min_x
+    logical_height = max_y - min_y
+    model_w, model_h = model_output_dimensions(out_w, out_h, logical_width, logical_height, model_resolution, max_dimension)
     if model_w != out_w or model_h != out_h:
         canvas_bytes = resize_rgba_bilinear(bytes(canvas), out_w, out_h, model_w, model_h)
         out_w = model_w
         out_h = model_h
     else:
         canvas_bytes = bytes(canvas)
-    logical_width = max_x - min_x
-    logical_height = max_y - min_y
     out_scale_x = out_w / logical_width if logical_width > 0 else out_scale
     out_scale_y = out_h / logical_height if logical_height > 0 else out_scale
 
@@ -296,6 +307,7 @@ def render_session_png(session: dict, *, cursor_source: str = "none", cursor_pat
         "sourceScale": source_scale,
         "modelDownsample": {
             "enabled": source_w != out_w or source_h != out_h,
+            "mode": model_resolution,
             "maxDimension": max_dimension,
         },
         "logicalBounds": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
@@ -378,7 +390,13 @@ def screenshot(args: argparse.Namespace) -> int:
 
     session = json.loads(session_path.read_text())
     cursor_source = "none" if args.no_cursor else args.cursor_source
-    png, metadata = render_session_png(session, cursor_source=cursor_source, cursor_path=root / "cursor.json", max_dimension=max(0, int(args.max_dimension or 0)))
+    png, metadata = render_session_png(
+        session,
+        cursor_source=cursor_source,
+        cursor_path=root / "cursor.json",
+        model_resolution=args.model_resolution,
+        max_dimension=max(0, int(args.max_dimension or 0)),
+    )
 
     png_path = session_path.with_suffix(".png")
     png_path.write_bytes(png)
@@ -555,7 +573,8 @@ def build_parser() -> argparse.ArgumentParser:
     shot.add_argument("--output-dir")
     shot.add_argument("--target", help="optional Hyprland window selector for unoccluded target-window capture")
     shot.add_argument("--base64", action="store_true")
-    shot.add_argument("--max-dimension", type=int, default=0, help="downsample the returned PNG so its longest edge is at most this many pixels; 0 keeps full resolution")
+    shot.add_argument("--model-resolution", choices=["full", "logical"], default="full", help="full keeps HiDPI pixels; logical downsamples to compositor logical resolution")
+    shot.add_argument("--max-dimension", type=int, default=0, help="optional extra cap for the returned PNG longest edge; 0 disables this cap")
     shot.add_argument("--no-cursor", action="store_true", help="do not draw the cursor indicator on the returned PNG")
     shot.add_argument(
         "--cursor-source",
