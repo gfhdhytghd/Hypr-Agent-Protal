@@ -19,6 +19,20 @@ def near(actual: float, expected: float, epsilon: float = 0.001) -> None:
     assert abs(actual - expected) <= epsilon, f"{actual} != {expected}"
 
 
+class DummyActionNode:
+    def __init__(self, actions: list[str]) -> None:
+        self.actions = actions
+
+    def get_n_actions(self) -> int:
+        return len(self.actions)
+
+    def get_action_name(self, index: int) -> str:
+        return self.actions[index]
+
+    def get_action_description(self, index: int) -> str:
+        return ""
+
+
 def main() -> int:
     mcp = load_mcp()
     window = {"at": [1772, 2108], "size": [1416, 828]}
@@ -92,6 +106,10 @@ def main() -> int:
         assert meta and meta["address"] == "0x3"
     finally:
         mcp.related_windows_for = original_related_windows_for
+
+    assert mcp.atspi_preferred_action_index(DummyActionNode(["showContextMenu", "jump"])) == 1
+    assert mcp.element_has_primary_atspi_action({"source": "atspi", "actions": ["jump"]}) is True
+    assert mcp.element_has_primary_atspi_action({"source": "synthetic", "actions": ["jump"]}) is False
     return 0
 
 

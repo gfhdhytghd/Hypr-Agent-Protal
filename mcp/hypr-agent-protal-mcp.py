@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.9"
+SERVER_VERSION = "0.3.10"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -1680,7 +1680,7 @@ def atspi_node_for_element(snapshot: dict[str, Any], element: dict[str, Any]) ->
 
 
 def atspi_preferred_action_index(node: Any) -> int | None:
-    preferred = {"click", "press", "activate", "default.activate", "invoke", "select", "toggle", "open"}
+    preferred = {"click", "press", "activate", "default.activate", "invoke", "select", "toggle", "open", "jump"}
     count = int(atspi_safe(node.get_n_actions, 0) or 0)
     fallback = None
     for index in range(count):
@@ -1878,6 +1878,19 @@ def atspi_child_action(operation: str, window: dict[str, Any], *, runtime_id: An
 def atspi_do_action_isolated(snapshot: dict[str, Any], element: dict[str, Any], action_name: str | None = None) -> bool:
     result = atspi_child_action("do_action", snapshot.get("window") or {}, runtime_id=element.get("runtimeId"), action=action_name)
     return bool(result.get("ok"))
+
+
+def element_has_primary_atspi_action(element: dict[str, Any]) -> bool:
+    if element.get("source") != "atspi":
+        return False
+    actions = element.get("actions")
+    if not isinstance(actions, list):
+        return False
+    preferred = {"click", "press", "activate", "default.activate", "invoke", "select", "toggle", "open", "jump"}
+    for action in actions:
+        if str(action).lower() in preferred:
+            return True
+    return False
 
 
 def atspi_insert_text_isolated(snapshot: dict[str, Any], text: str) -> bool:
@@ -2557,6 +2570,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
     click_count = int(args.get("click_count") or 1)
 
     element_index = args.get("element_index")
+    element = None
     if isinstance(element_index, str) and element_index:
         element = lookup_element(snapshot, element_index)
         x, y = visible_element_center(snapshot, element)
@@ -2565,6 +2579,11 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
         point = action_point(snapshot, args)
         x, y = point
         coordinate_space = args.get("coordinate_space") or "screenshot"
+
+    if element is not None and button == "left" and click_count == 1 and element_has_primary_atspi_action(element):
+        control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
+        if atspi_do_action_isolated(snapshot, element):
+            return mcp_snapshot_result(build_app_snapshot(app))
 
     global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
     action = "doubleclick" if click_count > 1 and button == "left" else "click"
