@@ -2,11 +2,6 @@
 
 hypr-agent-protal is an experimental Hyprland plugin plus MCP bridge for background agent control.
 
-`hyprcum` was the old pre-rename prototype. New Codex sessions should use only
-the `hypr-agent-protal` MCP server/namespace and Hyprland dispatchers. If both
-`mcp__hypr_agent_protal__` and `mcp__hyprcum__` are visible, the Codex
-configuration is stale; disable or remove the old `hyprcum` plugin/server.
-
 It exposes five compositor dispatchers:
 
 ```ini
