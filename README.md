@@ -64,6 +64,14 @@ scripts/hyprcumctl keyboard 'address:0x1234' tap v ctrl
 scripts/hyprcumctl keyboard 'address:0x1234' tap 28
 ```
 
+## Known Issues
+
+- 2026-05-05: Native Wayland Chrome/Discord accepts background pointer focus and
+  individual key events, but MCP paste actions that set the clipboard and send
+  `ctrl+v` did not paste into the Discord composer. Use `type` or explicit key
+  events as a temporary fallback until modifier/clipboard paste delivery is
+  fixed.
+
 ## Config
 
 ```ini

@@ -7,6 +7,7 @@
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
+#include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
 #include <algorithm>
@@ -389,6 +390,13 @@ struct KeyboardFocusRestore {
     KeyboardFocusRestore& operator=(const KeyboardFocusRestore&) = delete;
 };
 
+void activateXWaylandKeyboardTarget(const TargetSurface& target) {
+    if (!target.window || !target.window->m_isX11 || !target.window->m_xwaylandSurface)
+        return;
+
+    target.window->m_xwaylandSurface->activate(true);
+}
+
 void sendPointerScroll(double dx, double dy) {
     const auto sendAxis = [](wl_pointer_axis axis, double ticks) {
         if (std::abs(ticks) < 0.001)
@@ -517,6 +525,7 @@ SDispatchResult dispatchKeyboard(const std::string& args) {
     }
 
     KeyboardFocusRestore restore;
+    activateXWaylandKeyboardTarget(*target);
     g_pSeatManager->setKeyboardFocus(target->surface);
 
     const auto pressModifiers = [&] {
