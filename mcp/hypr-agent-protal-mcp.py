@@ -15,11 +15,14 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.4"
+SERVER_VERSION = "0.3.5"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
 _ATSPI: Any = None
+ATSPI_CHILD_ENV = "HYPR_AGENT_PROTAL_ATSPI_CHILD"
+ATSPI_CHILD_MODES = {"--atspi-probe", "--atspi-snapshot", "--atspi-action"}
+SESSION_ENV_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE")
 A11Y_LAUNCH_ENV = {
     "NO_AT_BRIDGE": "0",
     "QT_LINUX_ACCESSIBILITY_ALWAYS_ON": "1",
@@ -576,6 +579,25 @@ def hyprctl_environment() -> dict[str, str]:
     return env
 
 
+def session_environment() -> dict[str, str]:
+    env = hyprctl_environment()
+    runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    env["XDG_RUNTIME_DIR"] = runtime_dir
+    bus_path = pathlib.Path(runtime_dir) / "bus"
+    if not env.get("DBUS_SESSION_BUS_ADDRESS") and bus_path.exists():
+        env["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path={bus_path}"
+    return env
+
+
+def ensure_session_environment() -> dict[str, str]:
+    env = session_environment()
+    for key in SESSION_ENV_KEYS:
+        value = env.get(key)
+        if value:
+            os.environ[key] = value
+    return env
+
+
 def result_text(info: dict[str, Any]) -> dict[str, Any]:
     return {
         "content": [{"type": "text", "text": json.dumps(info, ensure_ascii=False)}],
@@ -1076,7 +1098,11 @@ def atspi_init_error() -> str | None:
     global _ATSPI_INIT_ERROR, _ATSPI
     if _ATSPI_INIT_ERROR is not None:
         return _ATSPI_INIT_ERROR if isinstance(_ATSPI_INIT_ERROR, str) else None
+    if os.environ.get(ATSPI_CHILD_ENV) != "1":
+        _ATSPI_INIT_ERROR = "AT-SPI is isolated to child subprocesses to keep the MCP transport alive after native toolkit crashes."
+        return _ATSPI_INIT_ERROR
     try:
+        ensure_session_environment()
         import gi  # type: ignore
 
         gi.require_version("Atspi", "2.0")
@@ -1436,6 +1462,182 @@ def atspi_snapshot(window: dict[str, Any], screenshot: dict[str, Any]) -> dict[s
         "elements": elements,
         "treeLines": tree_lines,
     }
+
+
+def atspi_empty_snapshot(status: str, error_message: str) -> dict[str, Any]:
+    return {"status": status, "error": error_message, "elements": [], "treeLines": [], "windowBounds": None}
+
+
+def trim_process_output(value: str, limit: int = 1200) -> str:
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
+
+
+def atspi_child_env() -> dict[str, str]:
+    env = session_environment()
+    env[ATSPI_CHILD_ENV] = "1"
+    return env
+
+
+def run_atspi_child(mode: str, payload: dict[str, Any], *, timeout: float = 5.0) -> dict[str, Any]:
+    if mode not in ATSPI_CHILD_MODES:
+        return {"status": "error", "error": f"unknown AT-SPI child mode: {mode}", "ok": False}
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(pathlib.Path(__file__).resolve()), mode],
+            input=json.dumps(payload, ensure_ascii=False),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=atspi_child_env(),
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        stderr = trim_process_output(exc.stderr or "") if isinstance(exc.stderr, str) else ""
+        detail = f"AT-SPI child timed out after {timeout:g}s"
+        if stderr:
+            detail = f"{detail}: {stderr}"
+        return {"status": "timeout", "error": detail, "ok": False}
+
+    stdout = proc.stdout.strip()
+    if proc.returncode != 0:
+        if proc.returncode < 0:
+            status = "crashed"
+            detail = f"AT-SPI child exited from signal {-proc.returncode}"
+        else:
+            status = "error"
+            detail = f"AT-SPI child exited with status {proc.returncode}"
+        stderr = trim_process_output(proc.stderr or "")
+        if stderr:
+            detail = f"{detail}: {stderr}"
+        return {"status": status, "error": detail, "ok": False}
+
+    try:
+        result = json.loads(stdout or "{}")
+    except json.JSONDecodeError as exc:
+        detail = f"AT-SPI child returned invalid JSON: {exc}"
+        stderr = trim_process_output(proc.stderr or "")
+        if stderr:
+            detail = f"{detail}: {stderr}"
+        return {"status": "error", "error": detail, "ok": False}
+    return result if isinstance(result, dict) else {"status": "error", "error": "AT-SPI child returned a non-object result.", "ok": False}
+
+
+def atspi_snapshot_isolated(window: dict[str, Any], screenshot: dict[str, Any]) -> dict[str, Any]:
+    result = run_atspi_child("--atspi-snapshot", {"window": window, "screenshot": screenshot}, timeout=6.0)
+    if result.get("status") == "ok" and isinstance(result.get("elements"), list) and isinstance(result.get("treeLines"), list):
+        return result
+    status = str(result.get("status") or "error")
+    error_message = str(result.get("error") or "AT-SPI child failed")
+    return atspi_empty_snapshot(status, error_message)
+
+
+def atspi_child_probe() -> dict[str, Any]:
+    result = run_atspi_child("--atspi-probe", {}, timeout=3.0)
+    if isinstance(result.get("available"), bool):
+        return result
+    return {"available": False, "mode": "isolated-child", "status": result.get("status", "error"), "error": str(result.get("error") or "AT-SPI child probe failed")}
+
+
+def atspi_child_action(operation: str, window: dict[str, Any], *, runtime_id: Any = None, action: str | None = None, text: str | None = None, value: str | None = None) -> dict[str, Any]:
+    payload = {"operation": operation, "window": window}
+    if runtime_id is not None:
+        payload["runtimeId"] = runtime_id
+    if action is not None:
+        payload["action"] = action
+    if text is not None:
+        payload["text"] = text
+    if value is not None:
+        payload["value"] = value
+    result = run_atspi_child("--atspi-action", payload, timeout=4.0)
+    if isinstance(result.get("ok"), bool):
+        return result
+    return {"ok": False, "status": result.get("status", "error"), "error": str(result.get("error") or "AT-SPI action child failed")}
+
+
+def atspi_do_action_isolated(snapshot: dict[str, Any], element: dict[str, Any], action_name: str | None = None) -> bool:
+    result = atspi_child_action("do_action", snapshot.get("window") or {}, runtime_id=element.get("runtimeId"), action=action_name)
+    return bool(result.get("ok"))
+
+
+def atspi_insert_text_isolated(snapshot: dict[str, Any], text: str) -> bool:
+    result = atspi_child_action("insert_text", snapshot.get("window") or {}, text=text)
+    return bool(result.get("ok"))
+
+
+def atspi_set_element_value_isolated(snapshot: dict[str, Any], element: dict[str, Any], value: str) -> bool:
+    result = atspi_child_action("set_value", snapshot.get("window") or {}, runtime_id=element.get("runtimeId"), value=value)
+    return bool(result.get("ok"))
+
+
+def atspi_child_probe_payload() -> dict[str, Any]:
+    init_error = atspi_init_error()
+    if init_error is not None:
+        return {"available": False, "mode": "isolated-child", "status": "unavailable", "error": init_error}
+    desktop = atspi_desktop()
+    if desktop is None:
+        return {"available": False, "mode": "isolated-child", "status": "unavailable", "error": "AT-SPI desktop is unavailable."}
+    return {"available": True, "mode": "isolated-child", "status": "ok", "desktopChildren": atspi_child_count(desktop)}
+
+
+def atspi_child_action_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    init_error = atspi_init_error()
+    if init_error is not None:
+        return {"ok": False, "status": "unavailable", "error": init_error}
+    window = payload.get("window") if isinstance(payload.get("window"), dict) else {}
+    operation = str(payload.get("operation") or "")
+    if operation == "insert_text":
+        text = payload.get("text")
+        if not isinstance(text, str):
+            return {"ok": False, "status": "error", "error": "insert_text requires text"}
+        return {"ok": atspi_insert_text({"window": window}, text), "status": "ok"}
+
+    runtime_id = payload.get("runtimeId")
+    if not isinstance(runtime_id, list):
+        return {"ok": False, "status": "error", "error": "AT-SPI action requires runtimeId"}
+    resolved = atspi_resolve_window(window)
+    if not resolved:
+        return {"ok": False, "status": "not-found", "error": "No matching AT-SPI app/window for this Hyprland client."}
+    app, _, _ = resolved
+    node = atspi_resolve_path(app, runtime_id)
+    if node is None:
+        return {"ok": False, "status": "not-found", "error": "AT-SPI runtimeId no longer resolves."}
+
+    if operation == "do_action":
+        action = payload.get("action")
+        return {"ok": atspi_do_action(node, action if isinstance(action, str) and action else None), "status": "ok"}
+    if operation == "set_value":
+        value = payload.get("value")
+        if not isinstance(value, str):
+            return {"ok": False, "status": "error", "error": "set_value requires value"}
+        return {"ok": atspi_set_element_value({"window": window}, {"runtimeId": runtime_id}, value), "status": "ok"}
+    return {"ok": False, "status": "error", "error": f"unknown AT-SPI operation: {operation}"}
+
+
+def atspi_child_main(mode: str) -> int:
+    os.environ[ATSPI_CHILD_ENV] = "1"
+    ensure_session_environment()
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        if not isinstance(payload, dict):
+            payload = {}
+        if mode == "--atspi-probe":
+            result = atspi_child_probe_payload()
+        elif mode == "--atspi-snapshot":
+            window = payload.get("window") if isinstance(payload.get("window"), dict) else {}
+            screenshot = payload.get("screenshot") if isinstance(payload.get("screenshot"), dict) else {}
+            result = atspi_snapshot(window, screenshot)
+        elif mode == "--atspi-action":
+            result = atspi_child_action_payload(payload)
+        else:
+            result = {"status": "error", "error": f"unknown AT-SPI child mode: {mode}", "ok": False}
+    except Exception as exc:
+        result = {"status": "error", "error": f"{type(exc).__name__}: {exc}", "ok": False}
+    print(json.dumps(result, ensure_ascii=False), flush=True)
+    return 0
 
 
 def clipboard_snapshot_text() -> dict[str, Any]:
@@ -1803,7 +2005,7 @@ def synthetic_elements(window: dict[str, Any], screenshot: dict[str, Any]) -> tu
 def build_app_snapshot(app_query: str) -> dict[str, Any]:
     window = resolve_hypr_window(app_query)
     screenshot, png_base64 = screenshot_for_window(window)
-    atspi = atspi_snapshot(window, screenshot)
+    atspi = atspi_snapshot_isolated(window, screenshot)
     elements = atspi["elements"] if atspi["status"] == "ok" and atspi["elements"] else []
     tree_lines = atspi["treeLines"] if atspi["status"] == "ok" and atspi["treeLines"] else []
     if not elements:
@@ -1988,8 +2190,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
     if isinstance(element_index, str) and element_index:
         element = lookup_element(snapshot, element_index)
         if button == "left" and element.get("source") == "atspi":
-            node = atspi_node_for_element(snapshot, element)
-            if atspi_do_action(node):
+            if atspi_do_action_isolated(snapshot, element):
                 refreshed = build_app_snapshot(app)
                 return mcp_snapshot_result(refreshed)
         x, y = element_center(element)
@@ -2014,12 +2215,12 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
 
 def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
-    element = lookup_element(current_snapshot(app), str(args.get("element_index") or ""))
+    snapshot = current_snapshot(app)
+    element = lookup_element(snapshot, str(args.get("element_index") or ""))
     action = str(args.get("action") or "")
     if not action:
         raise RuntimeError("Missing required argument: action")
-    node = atspi_node_for_element(current_snapshot(app), element)
-    if not atspi_do_action(node, action):
+    if not atspi_do_action_isolated(snapshot, element, action):
         raise RuntimeError(f"{action} is not a valid secondary action for element")
     return mcp_snapshot_result(build_app_snapshot(app))
 
@@ -2086,7 +2287,7 @@ def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(text, str) or not text:
         raise RuntimeError("Missing required argument: text")
     snapshot = current_snapshot(app)
-    if atspi_insert_text(snapshot, text):
+    if atspi_insert_text_isolated(snapshot, text):
         return mcp_snapshot_result(build_app_snapshot(app))
     type_text(str(snapshot["target"]), text, {"method": "auto"})
     return mcp_snapshot_result(build_app_snapshot(app))
@@ -2116,7 +2317,7 @@ def semantic_set_value(args: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("Missing required argument: value")
     snapshot = current_snapshot(app)
     element = lookup_element(snapshot, str(args.get("element_index") or ""))
-    if not atspi_set_element_value(snapshot, element, value):
+    if not atspi_set_element_value_isolated(snapshot, element, value):
         raise RuntimeError("Cannot set a value for an element that is not settable")
     return mcp_snapshot_result(build_app_snapshot(app))
 
@@ -2140,10 +2341,11 @@ def alias_click(button: str, click_count: int) -> Any:
 
 
 def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
-    resolved_env = hyprctl_environment()
+    resolved_env = session_environment()
+    atspi_probe = atspi_child_probe()
     diag: dict[str, Any] = {
         "pythonGI": shutil.which("python3") is not None,
-        "atspi": {"available": atspi_available(), "error": atspi_init_error()},
+        "atspi": atspi_probe,
         "session": {
             "XDG_RUNTIME_DIR": os.environ.get("XDG_RUNTIME_DIR", ""),
             "DBUS_SESSION_BUS_ADDRESS": os.environ.get("DBUS_SESSION_BUS_ADDRESS", ""),
@@ -2154,6 +2356,7 @@ def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
             "XDG_RUNTIME_DIR": resolved_env.get("XDG_RUNTIME_DIR", ""),
             "HYPRLAND_INSTANCE_SIGNATURE": resolved_env.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
             "WAYLAND_DISPLAY": resolved_env.get("WAYLAND_DISPLAY", ""),
+            "DBUS_SESSION_BUS_ADDRESS": resolved_env.get("DBUS_SESSION_BUS_ADDRESS", ""),
         },
         "recommendations": [
             "For Qt apps launched after configuration, set QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1.",
@@ -2161,9 +2364,9 @@ def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
             "Keep Hyprland screenshots enabled; AT-SPI is an enhancement, not the capture source.",
         ],
     }
-    proc = subprocess.run(["busctl", "--user", "--list"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    proc = subprocess.run(["busctl", "--user", "--list"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=resolved_env, check=False)
     diag["org.a11y.Bus"] = proc.returncode == 0 and "org.a11y.Bus" in proc.stdout
-    gsettings = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "toolkit-accessibility"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    gsettings = subprocess.run(["gsettings", "get", "org.gnome.desktop.interface", "toolkit-accessibility"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=resolved_env, check=False)
     if gsettings.returncode == 0:
         diag["toolkitAccessibility"] = gsettings.stdout.strip()
     if target:
@@ -2490,6 +2693,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def main() -> int:
+    ensure_session_environment()
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -2504,4 +2708,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] in ATSPI_CHILD_MODES:
+        raise SystemExit(atspi_child_main(sys.argv[1]))
     raise SystemExit(main())
