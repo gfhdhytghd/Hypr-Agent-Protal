@@ -110,6 +110,21 @@ def main() -> int:
     assert mcp.atspi_preferred_action_index(DummyActionNode(["showContextMenu", "jump"])) == 1
     assert mcp.element_has_primary_atspi_action({"source": "atspi", "actions": ["jump"]}) is True
     assert mcp.element_has_primary_atspi_action({"source": "synthetic", "actions": ["jump"]}) is False
+    assert mcp.scroll_action_for_direction("down") == "scrollDown"
+    assert mcp.element_supports_scroll_direction({"source": "atspi", "actions": ["scrollDown"]}, "down") is True
+
+    scroll_snapshot = {
+        "screenshot": {"width": 2862, "height": 1686},
+        "elements": [
+            {"source": "atspi", "controlType": "document web", "actions": ["scrollDown"], "frame": {"x": 15.0, "y": 363.0, "width": 5664.0, "height": 2964.0}},
+            {"source": "atspi", "controlType": "section", "actions": ["scrollDown"], "frame": {"x": 15.0, "y": 363.0, "width": 200.0, "height": 200.0}},
+        ],
+    }
+    scroll_element = mcp.best_scroll_element(scroll_snapshot, "down")
+    assert scroll_element is scroll_snapshot["elements"][0]
+    center = mcp.visible_element_center(scroll_snapshot, scroll_element)
+    near(center[0], 1438.5)
+    near(center[1], 1024.5)
     return 0
 
 

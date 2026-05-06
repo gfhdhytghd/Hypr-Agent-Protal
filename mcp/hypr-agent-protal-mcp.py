@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.10"
+SERVER_VERSION = "0.3.12"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -1893,6 +1893,54 @@ def element_has_primary_atspi_action(element: dict[str, Any]) -> bool:
     return False
 
 
+def element_atspi_actions(element: dict[str, Any]) -> set[str]:
+    if element.get("source") != "atspi":
+        return set()
+    actions = element.get("actions")
+    if not isinstance(actions, list):
+        return set()
+    return {str(action).lower() for action in actions}
+
+
+def scroll_action_for_direction(direction: str) -> str:
+    normalized = direction.lower()
+    if normalized == "down":
+        return "scrollDown"
+    if normalized == "up":
+        return "scrollUp"
+    if normalized == "left":
+        return "scrollLeft"
+    if normalized == "right":
+        return "scrollRight"
+    raise RuntimeError(f"Invalid scroll direction: {direction}")
+
+
+def element_supports_scroll_direction(element: dict[str, Any], direction: str) -> bool:
+    return scroll_action_for_direction(direction).lower() in element_atspi_actions(element)
+
+
+def best_scroll_element(snapshot: dict[str, Any], direction: str) -> dict[str, Any] | None:
+    candidates = []
+    for element in snapshot.get("elements") or []:
+        if not isinstance(element, dict) or not element_supports_scroll_direction(element, direction):
+            continue
+        rect = element_visible_rect(snapshot, element)
+        if rect is None:
+            continue
+        role = element_role(element)
+        area = rect["width"] * rect["height"]
+        priority = 0
+        if "document" in role:
+            priority += 1000
+        if "web" in role:
+            priority += 100
+        candidates.append((priority, area, element))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return candidates[0][2]
+
+
 def atspi_insert_text_isolated(snapshot: dict[str, Any], text: str) -> bool:
     result = atspi_child_action("insert_text", snapshot.get("window") or {}, text=text)
     return bool(result.get("ok"))
@@ -2619,15 +2667,26 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
     snapshot = current_snapshot(app)
     direction = str(args.get("direction") or "down").lower()
+    action_name = scroll_action_for_direction(direction)
     pages = float(args.get("pages") or 1.0)
     if pages <= 0:
         raise RuntimeError("pages must be > 0")
     element_index = args.get("element_index")
+    element = None
     if isinstance(element_index, str) and element_index:
-        x, y = element_center(lookup_element(snapshot, element_index))
+        element = lookup_element(snapshot, element_index)
+        x, y = visible_element_center(snapshot, element)
         coordinate_space = "screenshot"
     else:
-        x, y = action_point(snapshot, args, default_center=True)
+        element = best_scroll_element(snapshot, direction)
+        if element is not None:
+            x, y = visible_element_center(snapshot, element)
+            coordinate_space = "screenshot"
+        else:
+            x, y = action_point(snapshot, args, default_center=True)
+            coordinate_space = args.get("coordinate_space") or "screenshot"
+
+    if element is None and (not isinstance(element_index, str) or not element_index):
         coordinate_space = args.get("coordinate_space") or "screenshot"
     global_x, global_y = point_to_global(snapshot, x, y, coordinate_space)
     ticks = max(1.0, pages * 5.0)
@@ -2643,8 +2702,19 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
         dx = -ticks
     else:
         raise RuntimeError(f"Invalid scroll direction: {direction}")
-    call_ctl(["pointer", "--json", str(snapshot["target"]), str(global_x), str(global_y), "scroll", str(dy), "--dx", str(dx)])
-    return mcp_snapshot_result(build_app_snapshot(app))
+    try:
+        call_ctl(["pointer", "--json", str(snapshot["target"]), str(global_x), str(global_y), "scroll", str(dy), "--dx", str(dx)])
+        return mcp_snapshot_result(build_app_snapshot(app))
+    except Exception:
+        if element is None or not element_supports_scroll_direction(element, direction):
+            raise
+        control_overlay(snapshot, x, y, coordinate_space=coordinate_space, action="scroll")
+        ok = False
+        for _ in range(max(1, min(10, int(round(pages))))):
+            ok = atspi_do_action_isolated(snapshot, element, action_name) or ok
+        if not ok:
+            raise
+        return mcp_snapshot_result(build_app_snapshot(app))
 
 
 def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
@@ -2688,13 +2758,23 @@ def semantic_press_key(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
     snapshot = current_snapshot(app)
     key, modifiers = key_from_args(args)
-    control_overlay(snapshot, action="key")
     repeat = args.get("repeat", 1)
     if not isinstance(repeat, int) or repeat < 1:
         repeat = 1
+    try:
+        element = best_scroll_element(snapshot, "down") or best_scroll_element(snapshot, "up")
+        if element is not None:
+            x, y = visible_element_center(snapshot, element)
+            control_overlay(snapshot, x, y, action="key")
+        else:
+            x = y = None
+            control_overlay(snapshot, action="key")
+    except Exception:
+        x = y = None
+        control_overlay(snapshot, action="key")
     info: dict[str, Any] = {}
     for _ in range(min(repeat, 100)):
-        info = keyboard(str(snapshot["target"]), key, modifiers)
+        info = keyboard(str(snapshot["target"]), key, modifiers, x, y)
     if info:
         info["repeat"] = min(repeat, 100)
     return mcp_snapshot_result(build_app_snapshot(app))

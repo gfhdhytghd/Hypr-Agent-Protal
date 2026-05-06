@@ -1342,7 +1342,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
             return {.success = false, .error = "scroll dx/dy must be finite numbers"};
         sendPointerScroll(*dx, *dy);
         showAgentIndicator(target->window, Vector2D{*x, *y}, action);
-        restore.restoreForTarget(*target);
+        restore.restoreLater(std::chrono::milliseconds(90), false);
         return {.success = true};
     }
 
@@ -1626,9 +1626,7 @@ SDispatchResult dispatchKeyboard(const std::string& args) {
         g_pSeatManager->sendKeyboardKey(nowMs(), *key, WL_KEYBOARD_KEY_STATE_PRESSED);
         g_pSeatManager->sendKeyboardKey(nowMs(), *key, WL_KEYBOARD_KEY_STATE_RELEASED);
         releaseModifiers();
-        // Modified shortcuts can trigger asynchronous client work, e.g. clipboard paste.
-        if (modifierMask != 0)
-            restore.restoreLater(std::chrono::milliseconds(keyboardRestoreDelayMs()));
+        restore.restoreLater(std::chrono::milliseconds(modifierMask != 0 ? keyboardRestoreDelayMs() : 90));
         return {.success = true};
     }
 
@@ -1765,7 +1763,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.10",
+        .version = "0.3.12",
     };
 }
 
