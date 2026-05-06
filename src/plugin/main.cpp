@@ -542,15 +542,14 @@ void renderAgentIndicator(eRenderStage stage) {
     if (!pointInsideBox(global, windowBox))
         return;
 
-    const Vector2D tip{
-        global.x - monitor->m_position.x,
-        global.y - monitor->m_position.y,
-    };
-
     const bool   clickLike = g_agentPointerAction == "click" || g_agentPointerAction == "doubleclick" || g_agentPointerAction == "double-click" ||
         g_agentPointerAction == "press" || g_agentPointerAction == "down" || g_agentPointerAction == "release" || g_agentPointerAction == "up";
     const double pulse = clickLike ? std::clamp(1.0 - ageMs / 420.0, 0.0, 1.0) : 0.0;
     const double renderScale = std::max(1.0, static_cast<double>(monitor->m_scale));
+    const Vector2D tip{
+        (global.x - monitor->m_position.x) * renderScale,
+        (global.y - monitor->m_position.y) * renderScale,
+    };
     const double renderSize = (CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse) * renderScale;
     const auto   texture = codexCursorTexture();
     if (!texture || g_codexCursorTextureSize.x <= 0.0 || g_codexCursorTextureSize.y <= 0.0)
@@ -563,7 +562,12 @@ void renderAgentIndicator(eRenderStage stage) {
     data.tex = texture;
     data.box = CBox{x, y, renderSize, renderSize};
     data.a = static_cast<float>(fade);
-    data.clipBox = windowBox.copy().translate(-monitor->m_position).round();
+    auto clipBox = windowBox.copy().translate(-monitor->m_position);
+    clipBox.x *= renderScale;
+    clipBox.y *= renderScale;
+    clipBox.w *= renderScale;
+    clipBox.h *= renderScale;
+    data.clipBox = clipBox.round();
     g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(std::move(data)));
 }
 
