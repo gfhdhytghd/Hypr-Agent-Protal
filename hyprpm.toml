@@ -1,14 +1,14 @@
 [repository]
-name = "Hypr-ComputerUse-MCP"
+name = "hypr-agent-protal"
 authors = ["wilf"]
 commit_pins = [
     ["0.54.3", ""]
 ]
 
-[hyprcum]
-description = "Background Computer Use primitives for Hyprland"
+["hypr-agent-protal"]
+description = "Background agent primitives for Hyprland"
 authors = ["wilf"]
-output = "build-hyprpm/libhyprcum.so"
+output = "build-hyprpm/libhypr-agent-protal.so"
 build = [
     "cmake -S . -B build-hyprpm -DCMAKE_BUILD_TYPE=Release",
     "cmake --build build-hyprpm",

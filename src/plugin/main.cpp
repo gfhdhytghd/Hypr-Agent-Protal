@@ -7,7 +7,6 @@
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/event/EventBus.hpp>
-#include <hyprland/src/helpers/Monitor.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
@@ -56,7 +55,7 @@ T configValue(const std::string& name, T fallback) {
 }
 
 bool configBool(const std::string& suffix, bool fallback) {
-    return configValue<Hyprlang::INT>("plugin:hyprcum:" + suffix, fallback ? 1 : 0) != 0;
+    return configValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback ? 1 : 0) != 0;
 }
 
 std::string trim(std::string_view value) {
@@ -307,22 +306,15 @@ struct TargetSurface {
     Vector2D               local;
 };
 
-struct HiddenSessionWindow {
-    PHLWINDOWREF originalWindow;
-    PHLWORKSPACE originalWorkspace;
+struct WorkspaceSession {
+    PHLWINDOWREF root;
+    pid_t        pid = -1;
+    std::string  className;
+    std::string  initialClassName;
+    PHLWORKSPACE targetWorkspace;
 };
 
-struct HiddenSession {
-    PHLWINDOWREF                     root;
-    pid_t                            pid = -1;
-    std::string                      className;
-    std::string                      initialClassName;
-    PHLWORKSPACE                     hiddenWorkspace;
-    PHLWORKSPACE                     restoreWorkspace;
-    std::vector<HiddenSessionWindow> movedWindows;
-};
-
-std::vector<HiddenSession> g_hiddenSessions;
+std::vector<WorkspaceSession> g_workspaceSessions;
 
 CBox windowMainSurfaceGoalBox(const PHLWINDOW& window) {
     if (!window)
@@ -377,22 +369,14 @@ PHLWINDOW xwaylandRelatedWindowAt(const PHLWINDOW& root, const Vector2D& globalP
     return best;
 }
 
-PHLWORKSPACE hiddenSessionWorkspace(const PHLWINDOW& root, const std::string& requestedName) {
-    if (!g_pCompositor || !root)
-        return nullptr;
-
-    const auto workspaceName = requestedName.empty() ? std::string{"special:hyprcum"} : requestedName;
-    if (auto existing = g_pCompositor->getWorkspaceByName(workspaceName); existing)
-        return existing;
-
-    const auto monitor = root->m_monitor ? root->m_monitor : (!g_pCompositor->m_monitors.empty() ? g_pCompositor->m_monitors.front() : PHLMONITOR{});
-    if (!monitor)
-        return nullptr;
-
-    return g_pCompositor->createNewWorkspace(g_pCompositor->getNewSpecialID(), monitor->m_id, workspaceName, false);
+PHLWORKSPACE workspaceSessionTarget(const WorkspaceSession& session) {
+    const auto root = session.root.lock();
+    if (root && root->m_workspace)
+        return root->m_workspace;
+    return session.targetWorkspace;
 }
 
-bool hiddenSessionMatchesWindow(const HiddenSession& session, const PHLWINDOW& window) {
+bool workspaceSessionMatchesWindow(const WorkspaceSession& session, const PHLWINDOW& window) {
     if (!window || !window->m_isMapped)
         return false;
 
@@ -409,52 +393,38 @@ bool hiddenSessionMatchesWindow(const HiddenSession& session, const PHLWINDOW& w
     return !session.initialClassName.empty() && window->m_initialClass == session.initialClassName;
 }
 
-bool hiddenSessionHasWindow(const HiddenSession& session, const PHLWINDOW& window) {
-    return std::any_of(session.movedWindows.begin(), session.movedWindows.end(), [&window](const auto& item) { return item.originalWindow.lock() == window; });
-}
-
-void moveWindowIntoHiddenSession(HiddenSession& session, const PHLWINDOW& window) {
-    if (!g_pCompositor || !session.hiddenWorkspace || !window || !window->m_isMapped || window->m_workspace == session.hiddenWorkspace)
+void moveRelatedWindowToSessionWorkspace(WorkspaceSession& session, const PHLWINDOW& window) {
+    if (!g_pCompositor || !window || !window->m_isMapped)
         return;
 
-    if (!hiddenSessionHasWindow(session, window)) {
-        const auto root = session.root.lock();
-        const auto restoreWorkspace = root && window != root && session.restoreWorkspace ? session.restoreWorkspace : window->m_workspace;
-        session.movedWindows.push_back({.originalWindow = PHLWINDOWREF{window}, .originalWorkspace = restoreWorkspace});
-    }
-
-    g_pCompositor->moveWindowToWorkspaceSafe(window, session.hiddenWorkspace);
-}
-
-void syncHiddenSession(HiddenSession& session) {
-    if (!g_pCompositor || !session.hiddenWorkspace)
+    const auto root = session.root.lock();
+    if (root && window == root)
         return;
 
-    for (const auto& window : g_pCompositor->m_windows) {
-        if (hiddenSessionMatchesWindow(session, window))
-            moveWindowIntoHiddenSession(session, window);
-    }
+    const auto targetWorkspace = workspaceSessionTarget(session);
+    if (!targetWorkspace || targetWorkspace->inert() || window->m_workspace == targetWorkspace)
+        return;
+
+    g_pCompositor->moveWindowToWorkspaceSafe(window, targetWorkspace);
 }
 
-void restoreHiddenSession(HiddenSession& session) {
+void syncWorkspaceSession(WorkspaceSession& session) {
     if (!g_pCompositor)
         return;
 
-    for (auto it = session.movedWindows.rbegin(); it != session.movedWindows.rend(); ++it) {
-        const auto window = it->originalWindow.lock();
-        if (!window || !window->m_isMapped || !it->originalWorkspace || it->originalWorkspace->inert())
-            continue;
-        g_pCompositor->moveWindowToWorkspaceSafe(window, it->originalWorkspace);
+    for (const auto& window : g_pCompositor->m_windows) {
+        if (workspaceSessionMatchesWindow(session, window))
+            moveRelatedWindowToSessionWorkspace(session, window);
     }
 }
 
-void handleHiddenSessionWindowOpen(const PHLWINDOW& window) {
-    if (!window || g_hiddenSessions.empty())
+void handleWorkspaceSessionWindowOpen(const PHLWINDOW& window) {
+    if (!window || g_workspaceSessions.empty())
         return;
 
-    for (auto& session : g_hiddenSessions) {
-        if (hiddenSessionMatchesWindow(session, window))
-            moveWindowIntoHiddenSession(session, window);
+    for (auto& session : g_workspaceSessions) {
+        if (workspaceSessionMatchesWindow(session, window))
+            moveRelatedWindowToSessionWorkspace(session, window);
     }
 }
 
@@ -625,13 +595,13 @@ void sendPointerScroll(double dx, double dy) {
 
 SDispatchResult dispatchPointer(const std::string& args) {
     if (!configBool("allow_pointer", true))
-        return {.success = false, .error = "HyprCUM pointer dispatch is disabled"};
+        return {.success = false, .error = "hypr-agent-protal pointer dispatch is disabled"};
     if (!g_pSeatManager)
         return {.success = false, .error = "seat manager is not ready"};
 
     const auto parts = splitCsv(args);
     if (parts.size() < 4)
-        return {.success = false, .error = "usage: HyprCUM:pointer <window-regex>,<global-x>,<global-y>,<move|click|press|release>[,<button>]"};
+        return {.success = false, .error = "usage: hypr-agent-protal:pointer <window-regex>,<global-x>,<global-y>,<move|click|press|release>[,<button>]"};
 
     const auto x = parseDouble(parts[1]);
     const auto y = parseDouble(parts[2]);
@@ -705,13 +675,13 @@ SDispatchResult dispatchPointer(const std::string& args) {
 
 SDispatchResult dispatchKeyboard(const std::string& args) {
     if (!configBool("allow_keyboard", true))
-        return {.success = false, .error = "HyprCUM keyboard dispatch is disabled"};
+        return {.success = false, .error = "hypr-agent-protal keyboard dispatch is disabled"};
     if (!g_pSeatManager)
         return {.success = false, .error = "seat manager is not ready"};
 
     const auto parts = splitCsv(args);
     if (parts.size() < 3)
-        return {.success = false, .error = "usage: HyprCUM:keyboard <window-regex>,<tap|press|release>,<key>[,<modifiers>][,<global-x>,<global-y>]"};
+        return {.success = false, .error = "usage: hypr-agent-protal:keyboard <window-regex>,<tap|press|release>,<key>[,<modifiers>][,<global-x>,<global-y>]"};
 
     std::optional<TargetSurface> target;
     if (parts.size() >= 6) {
@@ -786,15 +756,15 @@ SDispatchResult dispatchKeyboard(const std::string& args) {
 
 SDispatchResult dispatchScreenshot(const std::string& args) {
     if (!configBool("allow_screenshot", true))
-        return {.success = false, .error = "HyprCUM screenshot dispatch is disabled"};
+        return {.success = false, .error = "hypr-agent-protal screenshot dispatch is disabled"};
 
     const auto parts = splitCsv(args);
     const auto path = parts.empty() ? std::string{} : trim(parts[0]);
     if (path.empty())
-        return {.success = false, .error = "usage: HyprCUM:screenshot <output-session-json-path>[,<window-regex>]"};
+        return {.success = false, .error = "usage: hypr-agent-protal:screenshot <output-session-json-path>[,<window-regex>]"};
 
     const auto target = parts.size() >= 2 ? trim(parts[1]) : std::string{};
-    const auto result = hyprcum::captureScreenshotSession(std::filesystem::path(path), target);
+    const auto result = hypr_agent_protal::captureScreenshotSession(std::filesystem::path(path), target);
     if (!result.success)
         return {.success = false, .error = result.error};
     return {.success = true};
@@ -802,13 +772,13 @@ SDispatchResult dispatchScreenshot(const std::string& args) {
 
 SDispatchResult dispatchSession(const std::string& args) {
     if (!configBool("allow_session", true))
-        return {.success = false, .error = "HyprCUM session dispatch is disabled"};
+        return {.success = false, .error = "hypr-agent-protal session dispatch is disabled"};
     if (!g_pCompositor)
         return {.success = false, .error = "compositor is not ready"};
 
     const auto parts = splitCsv(args);
     if (parts.empty())
-        return {.success = false, .error = "usage: HyprCUM:session <begin|sync|end>[,<window-regex>][,<special-workspace-name>]"};
+        return {.success = false, .error = "usage: hypr-agent-protal:session <begin|sync|end>[,<window-regex>]"};
 
     const auto action = lower(parts[0]);
     if (action == "begin") {
@@ -819,28 +789,21 @@ SDispatchResult dispatchSession(const std::string& args) {
         if (!root || !root->m_isMapped)
             return {.success = false, .error = "target window not found"};
 
-        const auto workspace = hiddenSessionWorkspace(root, parts.size() >= 3 ? trim(parts[2]) : std::string{});
-        if (!workspace)
-            return {.success = false, .error = "failed to create hidden session workspace"};
-
-        auto existing = std::find_if(g_hiddenSessions.begin(), g_hiddenSessions.end(), [&root](const auto& session) { return session.root.lock() == root; });
-        if (existing == g_hiddenSessions.end()) {
-            g_hiddenSessions.push_back({
+        auto existing = std::find_if(g_workspaceSessions.begin(), g_workspaceSessions.end(), [&root](const auto& session) { return session.root.lock() == root; });
+        if (existing == g_workspaceSessions.end()) {
+            g_workspaceSessions.push_back({
                 .root = PHLWINDOWREF{root},
                 .pid = root->getPID(),
                 .className = root->m_class,
                 .initialClassName = root->m_initialClass,
-                .hiddenWorkspace = workspace,
-                .restoreWorkspace = root->m_workspace,
+                .targetWorkspace = root->m_workspace,
             });
-            existing = std::prev(g_hiddenSessions.end());
+            existing = std::prev(g_workspaceSessions.end());
         } else {
-            existing->hiddenWorkspace = workspace;
-            if (!existing->restoreWorkspace)
-                existing->restoreWorkspace = root->m_workspace;
+            existing->targetWorkspace = root->m_workspace;
         }
 
-        syncHiddenSession(*existing);
+        syncWorkspaceSession(*existing);
         return {.success = true};
     }
 
@@ -849,13 +812,13 @@ SDispatchResult dispatchSession(const std::string& args) {
             const auto root = g_pCompositor->getWindowByRegex(parts[1]);
             if (!root)
                 return {.success = false, .error = "target window not found"};
-            auto existing = std::find_if(g_hiddenSessions.begin(), g_hiddenSessions.end(), [&root](const auto& session) { return session.root.lock() == root; });
-            if (existing == g_hiddenSessions.end())
+            auto existing = std::find_if(g_workspaceSessions.begin(), g_workspaceSessions.end(), [&root](const auto& session) { return session.root.lock() == root; });
+            if (existing == g_workspaceSessions.end())
                 return {.success = false, .error = "target session not found"};
-            syncHiddenSession(*existing);
+            syncWorkspaceSession(*existing);
         } else {
-            for (auto& session : g_hiddenSessions)
-                syncHiddenSession(session);
+            for (auto& session : g_workspaceSessions)
+                syncWorkspaceSession(session);
         }
         return {.success = true};
     }
@@ -866,20 +829,13 @@ SDispatchResult dispatchSession(const std::string& args) {
             if (!root)
                 return {.success = false, .error = "target window not found"};
 
-            const auto oldSize = g_hiddenSessions.size();
-            g_hiddenSessions.erase(std::remove_if(g_hiddenSessions.begin(), g_hiddenSessions.end(), [&root](auto& session) {
-                                      if (session.root.lock() != root)
-                                          return false;
-                                      restoreHiddenSession(session);
-                                      return true;
-                                  }),
-                                  g_hiddenSessions.end());
-            if (g_hiddenSessions.size() == oldSize)
+            const auto oldSize = g_workspaceSessions.size();
+            g_workspaceSessions.erase(std::remove_if(g_workspaceSessions.begin(), g_workspaceSessions.end(), [&root](auto& session) { return session.root.lock() == root; }),
+                                      g_workspaceSessions.end());
+            if (g_workspaceSessions.size() == oldSize)
                 return {.success = false, .error = "target session not found"};
         } else {
-            for (auto& session : g_hiddenSessions)
-                restoreHiddenSession(session);
-            g_hiddenSessions.clear();
+            g_workspaceSessions.clear();
         }
         return {.success = true};
     }
@@ -896,34 +852,28 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pluginHandle = handle;
 
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hyprcum:allow_pointer", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hyprcum:allow_keyboard", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hyprcum:allow_screenshot", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hyprcum:allow_session", Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_pointer", Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_keyboard", Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_screenshot", Hyprlang::INT{1});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_session", Hyprlang::INT{1});
 
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "HyprCUM:pointer", dispatchPointer);
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hyprcum:pointer", dispatchPointer);
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "HyprCUM:keyboard", dispatchKeyboard);
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hyprcum:keyboard", dispatchKeyboard);
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "HyprCUM:screenshot", dispatchScreenshot);
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hyprcum:screenshot", dispatchScreenshot);
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "HyprCUM:session", dispatchSession);
-    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hyprcum:session", dispatchSession);
-    g_windowOpenListener = Event::bus()->m_events.window.open.listen([](PHLWINDOW window) { handleHiddenSessionWindowOpen(window); });
+    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
+    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:keyboard", dispatchKeyboard);
+    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:screenshot", dispatchScreenshot);
+    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:session", dispatchSession);
+    g_windowOpenListener = Event::bus()->m_events.window.open.listen([](PHLWINDOW window) { handleWorkspaceSessionWindowOpen(window); });
     HyprlandAPI::reloadConfig();
 
     return {
-        .name = "Hypr-ComputerUse-MCP",
-        .description = "Background screenshot, pointer, and keyboard primitives for Hyprland Computer Use",
+        .name = "hypr-agent-protal",
+        .description = "Background screenshot, pointer, keyboard, and workspace guard primitives for Hyprland agents",
         .author = "wilf",
         .version = "0.2.1",
     };
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
-    for (auto& session : g_hiddenSessions)
-        restoreHiddenSession(session);
-    g_hiddenSessions.clear();
+    g_workspaceSessions.clear();
     g_windowOpenListener.reset();
 
     if (g_pEventLoopManager) {

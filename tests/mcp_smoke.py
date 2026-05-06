@@ -22,7 +22,7 @@ def main() -> int:
                     "params": {
                         "protocolVersion": "2025-06-18",
                         "capabilities": {},
-                        "clientInfo": {"name": "hyprcum-smoke", "version": "0"},
+                        "clientInfo": {"name": "hypr-agent-protal-smoke", "version": "0"},
                     },
                 }
             ),
@@ -45,7 +45,7 @@ def main() -> int:
         return proc.returncode or 1
 
     lines = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
-    assert lines[0]["result"]["serverInfo"]["name"] == "hyprcum"
+    assert lines[0]["result"]["serverInfo"]["name"] == "hypr-agent-protal"
     tools = lines[1]["result"]["tools"]
     assert len(tools) == 1
     assert tools[0]["name"] == "computer"

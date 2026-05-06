@@ -15,21 +15,21 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 def find_ctl() -> pathlib.Path:
-    candidates = [pathlib.Path(p) for p in [os.environ.get("HYPRCUMCTL")] if p]
+    candidates = [pathlib.Path(p) for p in [os.environ.get("HYPR_AGENT_PROTAL_CTL")] if p]
     candidates.extend(
         [
-            ROOT / "scripts" / "hyprcumctl",
-            pathlib.Path(__file__).resolve().with_name("hyprcumctl"),
+            ROOT / "scripts" / "hypr-agent-protalctl",
+            pathlib.Path(__file__).resolve().with_name("hypr-agent-protalctl"),
         ]
     )
-    found = shutil.which("hyprcumctl")
+    found = shutil.which("hypr-agent-protalctl")
     if found:
         candidates.append(pathlib.Path(found))
 
     for candidate in candidates:
         if candidate.is_file():
             return candidate
-    raise RuntimeError("hyprcumctl not found")
+    raise RuntimeError("hypr-agent-protalctl not found")
 
 
 COMPUTER_SCHEMA: dict[str, Any] = {
@@ -79,9 +79,8 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "session_action": {
             "type": "string",
             "enum": ["begin", "sync", "end"],
-            "description": "For session, begin/sync/end a hidden target-window session.",
+            "description": "For session, begin/sync/end a related-window workspace guard session.",
         },
-        "workspace": {"type": "string", "description": "For session, hidden special workspace name. Defaults to special:hyprcum."},
         "visible_workspace": {"type": "boolean", "description": "For windows, only return active-workspace clients."},
         "related_to": {
             "type": "string",
@@ -104,7 +103,7 @@ def error(req_id: Any, code: int, message: str) -> dict[str, Any]:
 def call_ctl(args: list[str]) -> dict[str, Any]:
     proc = subprocess.run([str(find_ctl()), *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or f"hyprcumctl exited {proc.returncode}").strip())
+        raise RuntimeError((proc.stderr or proc.stdout or f"hypr-agent-protalctl exited {proc.returncode}").strip())
     if not proc.stdout.strip():
         return {}
     return json.loads(proc.stdout)
@@ -267,9 +266,6 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
         target = args.get("target")
         if isinstance(target, str) and target:
             cmd.append(target)
-        workspace = args.get("workspace")
-        if isinstance(workspace, str) and workspace:
-            cmd.extend(["--workspace", workspace])
         return result_text(call_ctl(cmd))
 
     if action in {"move", "click", "doubleclick", "press", "release"}:
@@ -376,7 +372,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
             req_id,
             {
                 "protocolVersion": "2025-06-18",
-                "serverInfo": {"name": "hyprcum", "version": "0.2.1"},
+                "serverInfo": {"name": "hypr-agent-protal", "version": "0.2.1"},
                 "capabilities": {"tools": {"listChanged": False}},
             },
         )
@@ -388,7 +384,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
                 "tools": [
                     {
                         "name": "computer",
-                        "title": "Hyprland Computer",
+                        "title": "hypr-agent-protal",
                         "description": "Take Hyprland screenshots and send background pointer, keyboard, scroll, drag, and clipboard paste actions to a selected window.",
                         "inputSchema": COMPUTER_SCHEMA,
                     }

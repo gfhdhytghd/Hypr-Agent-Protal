@@ -4,7 +4,7 @@
 #include <string>
 #include <string_view>
 
-namespace hyprcum {
+namespace hypr_agent_protal {
 
 struct ScreenshotResult {
     bool        success = false;
@@ -13,4 +13,4 @@ struct ScreenshotResult {
 
 ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJsonPath, std::string_view targetRegex = {});
 
-} // namespace hyprcum
+} // namespace hypr_agent_protal

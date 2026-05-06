@@ -142,7 +142,7 @@ def hyprctl(*args: str) -> subprocess.CompletedProcess:
 
 
 def screenshot(args: argparse.Namespace) -> int:
-    root = pathlib.Path(args.output_dir or tempfile.gettempdir()) / f"hyprcum-{os.getuid()}"
+    root = pathlib.Path(args.output_dir or tempfile.gettempdir()) / f"hypr-agent-protal-{os.getuid()}"
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     session_path = root / f"session-{time.time_ns()}.json"
 
@@ -208,15 +208,13 @@ def session(args: argparse.Namespace) -> int:
     parts = [args.action]
     if args.target:
         parts.append(args.target)
-    if args.workspace:
-        parts.append(args.workspace)
 
     result = dispatch(args.dispatcher, ",".join(parts))
     if result.returncode != 0:
         print(result.stderr or result.stdout, file=sys.stderr, end="")
         return result.returncode or 1
     if args.json:
-        print(json.dumps({"ok": True, "action": args.action, "target": args.target or "", "workspace": args.workspace or ""}))
+        print(json.dumps({"ok": True, "action": args.action, "target": args.target or ""}))
     else:
         print(result.stdout, end="")
     return 0
@@ -278,10 +276,10 @@ def is_related_window(client: dict, target: dict) -> bool:
 def annotate_relation(client: dict, target: dict) -> dict:
     annotated = dict(client)
     if client.get("address") == target.get("address"):
-        annotated["hyprcumRelation"] = "self"
+        annotated["hyprAgentProtalRelation"] = "self"
         return annotated
 
-    annotated["hyprcumRelation"] = "related"
+    annotated["hyprAgentProtalRelation"] = "related"
     tx, ty = target.get("at") or [0, 0]
     tw, th = target.get("size") or [0, 0]
     x, y = client.get("at") or [0, 0]
@@ -289,18 +287,18 @@ def annotate_relation(client: dict, target: dict) -> dict:
     target_area = max(1.0, float(tw) * float(th))
     area = max(1.0, float(w) * float(h))
     if area < target_area * 0.6 and x >= tx - 64 and y >= ty - 64 and x <= tx + tw + 64 and y <= ty + th + 64:
-        annotated["hyprcumWindowKind"] = "popup"
+        annotated["hyprAgentProtalWindowKind"] = "popup"
     else:
-        annotated["hyprcumWindowKind"] = "related"
+        annotated["hyprAgentProtalWindowKind"] = "related"
     return annotated
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="HyprCUM command line bridge")
+    parser = argparse.ArgumentParser(description="hypr-agent-protal command line bridge")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     shot = sub.add_parser("screenshot", help="capture a compositor screenshot session")
-    shot.add_argument("--dispatcher", default="HyprCUM:screenshot")
+    shot.add_argument("--dispatcher", default="hypr-agent-protal:screenshot")
     shot.add_argument("--output-dir")
     shot.add_argument("--target", help="optional Hyprland window selector for unoccluded target-window capture")
     shot.add_argument("--base64", action="store_true")
@@ -313,7 +311,7 @@ def build_parser() -> argparse.ArgumentParser:
     ptr.add_argument("action", choices=["move", "motion", "click", "doubleclick", "double-click", "press", "down", "release", "up", "scroll"])
     ptr.add_argument("button", nargs="?", default="left", help="button name, or vertical wheel ticks for scroll")
     ptr.add_argument("--dx", type=float, help="horizontal wheel ticks for scroll")
-    ptr.add_argument("--dispatcher", default="HyprCUM:pointer")
+    ptr.add_argument("--dispatcher", default="hypr-agent-protal:pointer")
     ptr.add_argument("--json", action="store_true")
     ptr.set_defaults(func=pointer)
 
@@ -324,15 +322,14 @@ def build_parser() -> argparse.ArgumentParser:
     key.add_argument("modifiers", nargs="?", default="", help="optional modifiers, for example ctrl+shift")
     key.add_argument("--x", type=float, help="optional global logical x coordinate to resolve a subsurface")
     key.add_argument("--y", type=float, help="optional global logical y coordinate to resolve a subsurface")
-    key.add_argument("--dispatcher", default="HyprCUM:keyboard")
+    key.add_argument("--dispatcher", default="hypr-agent-protal:keyboard")
     key.add_argument("--json", action="store_true")
     key.set_defaults(func=keyboard)
 
-    sess = sub.add_parser("session", help="begin, sync, or end a hidden Computer Use window session")
+    sess = sub.add_parser("session", help="begin, sync, or end a related-window workspace guard session")
     sess.add_argument("action", choices=["begin", "sync", "end"])
     sess.add_argument("target", nargs="?", help="Hyprland window regex, for example address:0x1234")
-    sess.add_argument("--workspace", default="", help="hidden special workspace name, default special:hyprcum")
-    sess.add_argument("--dispatcher", default="HyprCUM:session")
+    sess.add_argument("--dispatcher", default="hypr-agent-protal:session")
     sess.add_argument("--json", action="store_true")
     sess.set_defaults(func=session)
 

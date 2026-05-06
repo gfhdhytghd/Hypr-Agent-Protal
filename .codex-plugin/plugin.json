@@ -1,11 +1,11 @@
 {
-  "name": "hypr-computer-use-mcp",
+  "name": "hypr-agent-protal",
   "version": "0.2.1",
-  "description": "Hyprland background screenshot, input, and clipboard Computer Use MCP bridge",
+  "description": "Hyprland background screenshot, input, and clipboard MCP bridge",
   "mcpServers": "./.mcp.json",
   "interface": {
-    "displayName": "Hypr Computer Use MCP",
-    "shortDescription": "Background Computer Use for Hyprland",
+    "displayName": "hypr-agent-protal",
+    "shortDescription": "Background agents for Hyprland",
     "developerName": "wilf",
     "category": "Developer Tools",
     "capabilities": ["mcp", "computer-use"],

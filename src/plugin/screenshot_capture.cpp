@@ -32,7 +32,7 @@
 #include <unistd.h>
 #include <vector>
 
-namespace hyprcum {
+namespace hypr_agent_protal {
 namespace {
 
 using Json = nlohmann::ordered_json;
@@ -679,4 +679,4 @@ ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJso
     return {.success = true};
 }
 
-} // namespace hyprcum
+} // namespace hypr_agent_protal

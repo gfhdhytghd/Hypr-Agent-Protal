@@ -1,15 +1,15 @@
-# Hypr-ComputerUse-MCP
+# hypr-agent-protal
 
-Hypr-ComputerUse-MCP is an experimental Hyprland plugin plus MCP bridge for background Computer Use.
+hypr-agent-protal is an experimental Hyprland plugin plus MCP bridge for background agent control.
 
 It exposes four compositor dispatchers:
 
 ```ini
-hyprctl dispatch HyprCUM:screenshot /tmp/hyprcum-session.json
-hyprctl dispatch HyprCUM:screenshot '/tmp/hyprcum-session.json,address:0x1234'
-hyprctl dispatch HyprCUM:pointer 'address:0x1234,930,520,click,left'
-hyprctl dispatch HyprCUM:keyboard 'address:0x1234,tap,v,ctrl'
-hyprctl dispatch HyprCUM:session 'begin,address:0x1234'
+hyprctl dispatch hypr-agent-protal:screenshot /tmp/hypr-agent-protal-session.json
+hyprctl dispatch hypr-agent-protal:screenshot '/tmp/hypr-agent-protal-session.json,address:0x1234'
+hyprctl dispatch hypr-agent-protal:pointer 'address:0x1234,930,520,click,left'
+hyprctl dispatch hypr-agent-protal:keyboard 'address:0x1234,tap,v,ctrl'
+hyprctl dispatch hypr-agent-protal:session 'begin,address:0x1234'
 ```
 
 The screenshot dispatcher renders active monitor workspaces into RGBA artifacts from inside Hyprland, then writes a JSON session file. When a window selector is supplied, it renders that window directly into an offscreen framebuffer, so the artifact is not occluded by other windows. The pointer dispatcher resolves the target with `g_pCompositor->getWindowByRegex()`, focuses the target surface only for the injected pointer events, sends motion/button/frame events through `g_pSeatManager`, then restores the previous pointer focus.
@@ -18,7 +18,7 @@ For XWayland windows, the dispatcher sends to the `wlSurface()` resource and sca
 
 The keyboard dispatcher temporarily focuses the target surface, sends key events and modifier state through `g_pSeatManager`, then restores the previous keyboard focus. The MCP layer uses that for shortcuts and text/file/image paste flows.
 
-For apps that spawn visible XWayland helper windows during background control, `HyprCUM:session begin,<target>` moves the target and same-process related windows to `special:hyprcum`. New related windows opened during the session are moved there as well. `HyprCUM:session end,<target>` restores the windows to their original workspaces.
+For apps that spawn visible XWayland helper windows during background control, `hypr-agent-protal:session begin,<target>` records the target window workspace. New same-process related windows opened during the session are moved back to that workspace instead of appearing on the agent's current workspace.
 
 ## Build
 
@@ -27,11 +27,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ```
 
-Install or load `build/libhyprcum.so` as a Hyprland plugin. With hyprpm:
+Install or load `build/libhypr-agent-protal.so` as a Hyprland plugin. With hyprpm:
 
 ```sh
 hyprpm add .
-hyprpm enable hyprcum
+hyprpm enable hypr-agent-protal
 hyprpm reload
 ```
 
@@ -40,7 +40,7 @@ hyprpm reload
 The repository includes a Codex plugin manifest and a stdio MCP server:
 
 ```sh
-python3 mcp/hyprcum_mcp.py
+python3 mcp/hypr-agent-protal-mcp.py
 ```
 
 The MCP server exposes one tool named `computer` with these actions:
@@ -53,22 +53,22 @@ The MCP server exposes one tool named `computer` with these actions:
 - `key`: sends a shortcut such as `ctrl+v`, `enter`, or `escape` to a target window. It also accepts raw evdev keycodes through `keycode` for ydotool-style fallback.
 - `type`, `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
 - `copy_text`: writes text to the clipboard without sending input.
-- `session`: begins, syncs, or ends a hidden target-window session. Use `session_action` values `begin`, `sync`, or `end`.
+- `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
 
 The command-line bridge is also usable directly:
 
 ```sh
-scripts/hyprcumctl screenshot --base64
-scripts/hyprcumctl screenshot --target 'address:0x1234' --base64
-scripts/hyprcumctl windows
-scripts/hyprcumctl windows --related-to 'address:0x1234'
-scripts/hyprcumctl pointer 'address:0x1234' 930 520 click left
-scripts/hyprcumctl pointer 'address:0x1234' 930 520 scroll -3
-scripts/hyprcumctl keyboard 'address:0x1234' tap v ctrl
-scripts/hyprcumctl keyboard 'address:0x1234' tap 28
-scripts/hyprcumctl session begin 'address:0x1234'
-scripts/hyprcumctl session end 'address:0x1234'
+scripts/hypr-agent-protalctl screenshot --base64
+scripts/hypr-agent-protalctl screenshot --target 'address:0x1234' --base64
+scripts/hypr-agent-protalctl windows
+scripts/hypr-agent-protalctl windows --related-to 'address:0x1234'
+scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 click left
+scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 scroll -3
+scripts/hypr-agent-protalctl keyboard 'address:0x1234' tap v ctrl
+scripts/hypr-agent-protalctl keyboard 'address:0x1234' tap 28
+scripts/hypr-agent-protalctl session begin 'address:0x1234'
+scripts/hypr-agent-protalctl session end 'address:0x1234'
 ```
 
 ## Known Issues
@@ -83,7 +83,7 @@ scripts/hyprcumctl session end 'address:0x1234'
 
 ```ini
 plugin {
-  hyprcum {
+  hypr-agent-protal {
     allow_screenshot = 1
     allow_pointer = 1
     allow_keyboard = 1

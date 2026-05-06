@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(HyprComputerUseMCP VERSION "0.2.1")
+project(HyprAgentProtal VERSION "0.2.1")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -25,29 +25,31 @@ pkg_check_modules(HYPR_DEPS REQUIRED hyprland)
 find_package(nlohmann_json REQUIRED)
 find_package(Python3 COMPONENTS Interpreter)
 
-add_library(hyprcum SHARED
+add_library(hypr_agent_protal SHARED
   src/plugin/main.cpp
   src/plugin/screenshot_capture.cpp
 )
 
-target_include_directories(hyprcum PRIVATE src ${HYPR_DEPS_INCLUDE_DIRS})
-target_link_directories(hyprcum PRIVATE ${HYPR_DEPS_LIBRARY_DIRS})
-target_link_libraries(hyprcum PRIVATE ${HYPR_DEPS_LIBRARIES} nlohmann_json::nlohmann_json)
-target_link_options(hyprcum PRIVATE -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
+set_target_properties(hypr_agent_protal PROPERTIES OUTPUT_NAME "hypr-agent-protal")
 
-install(TARGETS hyprcum LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(PROGRAMS scripts/hyprcumctl mcp/hyprcum_mcp.py DESTINATION ${CMAKE_INSTALL_BINDIR})
+target_include_directories(hypr_agent_protal PRIVATE src ${HYPR_DEPS_INCLUDE_DIRS})
+target_link_directories(hypr_agent_protal PRIVATE ${HYPR_DEPS_LIBRARY_DIRS})
+target_link_libraries(hypr_agent_protal PRIVATE ${HYPR_DEPS_LIBRARIES} nlohmann_json::nlohmann_json)
+target_link_options(hypr_agent_protal PRIVATE -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
+
+install(TARGETS hypr_agent_protal LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(PROGRAMS scripts/hypr-agent-protalctl mcp/hypr-agent-protal-mcp.py DESTINATION ${CMAKE_INSTALL_BINDIR})
 
 if(BUILD_TESTING AND Python3_Interpreter_FOUND)
   add_test(
-    NAME hyprcum-python-compile
+    NAME hypr-agent-protal-python-compile
     COMMAND ${Python3_EXECUTABLE} -m py_compile
-      ${CMAKE_SOURCE_DIR}/scripts/hyprcumctl
-      ${CMAKE_SOURCE_DIR}/mcp/hyprcum_mcp.py
+      ${CMAKE_SOURCE_DIR}/scripts/hypr-agent-protalctl
+      ${CMAKE_SOURCE_DIR}/mcp/hypr-agent-protal-mcp.py
       ${CMAKE_SOURCE_DIR}/tests/mcp_smoke.py
   )
   add_test(
-    NAME hyprcum-mcp-smoke
-    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/mcp_smoke.py ${CMAKE_SOURCE_DIR}/mcp/hyprcum_mcp.py
+    NAME hypr-agent-protal-mcp-smoke
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/mcp_smoke.py ${CMAKE_SOURCE_DIR}/mcp/hypr-agent-protal-mcp.py
   )
 endif()
