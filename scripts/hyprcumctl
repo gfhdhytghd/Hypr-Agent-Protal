@@ -204,6 +204,24 @@ def keyboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def session(args: argparse.Namespace) -> int:
+    parts = [args.action]
+    if args.target:
+        parts.append(args.target)
+    if args.workspace:
+        parts.append(args.workspace)
+
+    result = dispatch(args.dispatcher, ",".join(parts))
+    if result.returncode != 0:
+        print(result.stderr or result.stdout, file=sys.stderr, end="")
+        return result.returncode or 1
+    if args.json:
+        print(json.dumps({"ok": True, "action": args.action, "target": args.target or "", "workspace": args.workspace or ""}))
+    else:
+        print(result.stdout, end="")
+    return 0
+
+
 def windows(args: argparse.Namespace) -> int:
     result = hyprctl("clients", "-j")
     if result.returncode != 0:
@@ -309,6 +327,14 @@ def build_parser() -> argparse.ArgumentParser:
     key.add_argument("--dispatcher", default="HyprCUM:keyboard")
     key.add_argument("--json", action="store_true")
     key.set_defaults(func=keyboard)
+
+    sess = sub.add_parser("session", help="begin, sync, or end a hidden Computer Use window session")
+    sess.add_argument("action", choices=["begin", "sync", "end"])
+    sess.add_argument("target", nargs="?", help="Hyprland window regex, for example address:0x1234")
+    sess.add_argument("--workspace", default="", help="hidden special workspace name, default special:hyprcum")
+    sess.add_argument("--dispatcher", default="HyprCUM:session")
+    sess.add_argument("--json", action="store_true")
+    sess.set_defaults(func=session)
 
     win = sub.add_parser("windows", help="list Hyprland windows")
     win.add_argument("--visible-workspace", action="store_true", help="only return clients on the active workspace")

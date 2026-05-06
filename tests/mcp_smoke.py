@@ -50,10 +50,11 @@ def main() -> int:
     assert len(tools) == 1
     assert tools[0]["name"] == "computer"
     actions = set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
-    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "wait"]:
+    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait"]:
         assert action in actions
     assert tools[0]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
     assert tools[0]["inputSchema"]["properties"]["related_to"]["type"] == "string"
+    assert "begin" in tools[0]["inputSchema"]["properties"]["session_action"]["enum"]
     return 0
 
 

@@ -53,6 +53,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
                 "paste_text",
                 "paste_file",
                 "paste_image",
+                "session",
                 "wait",
             ],
             "description": "Computer use action to perform.",
@@ -75,6 +76,12 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "text": {"type": "string", "description": "Text for type/copy_text/paste_text actions."},
         "path": {"type": "string", "description": "Filesystem path for paste_file/paste_image actions."},
         "duration": {"type": "number", "description": "Duration in seconds for wait or drag pacing."},
+        "session_action": {
+            "type": "string",
+            "enum": ["begin", "sync", "end"],
+            "description": "For session, begin/sync/end a hidden target-window session.",
+        },
+        "workspace": {"type": "string", "description": "For session, hidden special workspace name. Defaults to special:hyprcum."},
         "visible_workspace": {"type": "boolean", "description": "For windows, only return active-workspace clients."},
         "related_to": {
             "type": "string",
@@ -250,6 +257,19 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
         related_to = args.get("related_to")
         if isinstance(related_to, str) and related_to:
             cmd.extend(["--related-to", related_to])
+        return result_text(call_ctl(cmd))
+
+    if action == "session":
+        session_action = args.get("session_action")
+        if not isinstance(session_action, str) or not session_action:
+            raise RuntimeError("session requires session_action")
+        cmd = ["session", "--json", session_action]
+        target = args.get("target")
+        if isinstance(target, str) and target:
+            cmd.append(target)
+        workspace = args.get("workspace")
+        if isinstance(workspace, str) and workspace:
+            cmd.extend(["--workspace", workspace])
         return result_text(call_ctl(cmd))
 
     if action in {"move", "click", "doubleclick", "press", "release"}:

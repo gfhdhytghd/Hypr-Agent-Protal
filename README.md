@@ -2,13 +2,14 @@
 
 Hypr-ComputerUse-MCP is an experimental Hyprland plugin plus MCP bridge for background Computer Use.
 
-It exposes three compositor dispatchers:
+It exposes four compositor dispatchers:
 
 ```ini
 hyprctl dispatch HyprCUM:screenshot /tmp/hyprcum-session.json
 hyprctl dispatch HyprCUM:screenshot '/tmp/hyprcum-session.json,address:0x1234'
 hyprctl dispatch HyprCUM:pointer 'address:0x1234,930,520,click,left'
 hyprctl dispatch HyprCUM:keyboard 'address:0x1234,tap,v,ctrl'
+hyprctl dispatch HyprCUM:session 'begin,address:0x1234'
 ```
 
 The screenshot dispatcher renders active monitor workspaces into RGBA artifacts from inside Hyprland, then writes a JSON session file. When a window selector is supplied, it renders that window directly into an offscreen framebuffer, so the artifact is not occluded by other windows. The pointer dispatcher resolves the target with `g_pCompositor->getWindowByRegex()`, focuses the target surface only for the injected pointer events, sends motion/button/frame events through `g_pSeatManager`, then restores the previous pointer focus.
@@ -16,6 +17,8 @@ The screenshot dispatcher renders active monitor workspaces into RGBA artifacts 
 For XWayland windows, the dispatcher sends to the `wlSurface()` resource and scales surface-local coordinates by `m_X11SurfaceScaledBy`. If the requested global coordinate lands on a same-process XWayland helper window, such as a search popup, pointer and keyboard dispatch are automatically routed to that related window. For native Wayland windows, it uses `vectorWindowToSurface(globalPos, window, localPos)` so subsurfaces receive local coordinates.
 
 The keyboard dispatcher temporarily focuses the target surface, sends key events and modifier state through `g_pSeatManager`, then restores the previous keyboard focus. The MCP layer uses that for shortcuts and text/file/image paste flows.
+
+For apps that spawn visible XWayland helper windows during background control, `HyprCUM:session begin,<target>` moves the target and same-process related windows to `special:hyprcum`. New related windows opened during the session are moved there as well. `HyprCUM:session end,<target>` restores the windows to their original workspaces.
 
 ## Build
 
@@ -50,6 +53,7 @@ The MCP server exposes one tool named `computer` with these actions:
 - `key`: sends a shortcut such as `ctrl+v`, `enter`, or `escape` to a target window. It also accepts raw evdev keycodes through `keycode` for ydotool-style fallback.
 - `type`, `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
 - `copy_text`: writes text to the clipboard without sending input.
+- `session`: begins, syncs, or ends a hidden target-window session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
 
 The command-line bridge is also usable directly:
@@ -63,6 +67,8 @@ scripts/hyprcumctl pointer 'address:0x1234' 930 520 click left
 scripts/hyprcumctl pointer 'address:0x1234' 930 520 scroll -3
 scripts/hyprcumctl keyboard 'address:0x1234' tap v ctrl
 scripts/hyprcumctl keyboard 'address:0x1234' tap 28
+scripts/hyprcumctl session begin 'address:0x1234'
+scripts/hyprcumctl session end 'address:0x1234'
 ```
 
 ## Known Issues
@@ -81,6 +87,7 @@ plugin {
     allow_screenshot = 1
     allow_pointer = 1
     allow_keyboard = 1
+    allow_session = 1
   }
 }
 ```
