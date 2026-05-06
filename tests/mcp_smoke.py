@@ -80,7 +80,7 @@ def main() -> int:
         "wait",
     }
     assert set(tools_by_name) == expected_tools
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.20"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.21"
     actions = set(tools_by_name["computer"]["inputSchema"]["properties"]["action"]["enum"])
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "doctor", "launch", "launch_app", "open_app", "get_cursor_position", "left_click", "left_click_drag", "hover"]:
         assert action in actions
