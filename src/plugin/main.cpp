@@ -550,7 +550,8 @@ void renderAgentIndicator(eRenderStage stage) {
     const bool   clickLike = g_agentPointerAction == "click" || g_agentPointerAction == "doubleclick" || g_agentPointerAction == "double-click" ||
         g_agentPointerAction == "press" || g_agentPointerAction == "down" || g_agentPointerAction == "release" || g_agentPointerAction == "up";
     const double pulse = clickLike ? std::clamp(1.0 - ageMs / 420.0, 0.0, 1.0) : 0.0;
-    const double renderSize = CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse;
+    const double renderScale = std::max(1.0, static_cast<double>(monitor->m_scale));
+    const double renderSize = (CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse) * renderScale;
     const auto   texture = codexCursorTexture();
     if (!texture || g_codexCursorTextureSize.x <= 0.0 || g_codexCursorTextureSize.y <= 0.0)
         return;
@@ -1767,7 +1768,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.16",
+        .version = "0.3.17",
     };
 }
 

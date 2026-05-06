@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.16"
+SERVER_VERSION = "0.3.17"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
