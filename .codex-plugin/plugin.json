@@ -1,7 +1,7 @@
 {
   "name": "hypr-agent-protal",
-  "version": "0.2.4",
-  "description": "Hyprland background screenshot, input, and clipboard MCP bridge",
+  "version": "0.3.0",
+  "description": "Hyprland background screenshot, input, clipboard, and app-state MCP bridge",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "hypr-agent-protal",
@@ -9,6 +9,6 @@
     "developerName": "wilf",
     "category": "Developer Tools",
     "capabilities": ["mcp", "computer-use"],
-    "defaultPrompt": "Use the Hyprland computer tool for screenshots, window discovery, target-window pointer/keyboard input, scrolling, dragging, and clipboard paste."
+    "defaultPrompt": "Use the Hyprland Computer Use tools for app-state snapshots, window discovery, target-window pointer/keyboard input, scrolling, dragging, value setting, and clipboard paste."
   }
 }

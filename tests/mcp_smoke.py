@@ -47,22 +47,41 @@ def main() -> int:
     lines = [json.loads(line) for line in proc.stdout.splitlines() if line.strip()]
     assert lines[0]["result"]["serverInfo"]["name"] == "hypr-agent-protal"
     tools = lines[1]["result"]["tools"]
-    assert len(tools) == 1
-    assert tools[0]["name"] == "computer"
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.2.9"
-    actions = set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
-    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait"]:
+    tools_by_name = {tool["name"]: tool for tool in tools}
+    expected_tools = {
+        "computer",
+        "list_apps",
+        "get_app_state",
+        "click",
+        "perform_secondary_action",
+        "scroll",
+        "drag",
+        "type_text",
+        "press_key",
+        "set_value",
+    }
+    assert set(tools_by_name) == expected_tools
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.0"
+    actions = set(tools_by_name["computer"]["inputSchema"]["properties"]["action"]["enum"])
+    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "doctor"]:
         assert action in actions
-    assert tools[0]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
-    assert tools[0]["inputSchema"]["properties"]["show_cursor"]["type"] == "boolean"
-    assert tools[0]["inputSchema"]["properties"]["show_cursor"]["default"] is False
-    assert "agent" in tools[0]["inputSchema"]["properties"]["cursor_source"]["enum"]
-    assert tools[0]["inputSchema"]["properties"]["cursor_source"]["default"] == "none"
-    assert "keys" in tools[0]["inputSchema"]["properties"]["method"]["enum"]
-    assert tools[0]["inputSchema"]["properties"]["prefer_related"]["type"] == "boolean"
-    assert tools[0]["inputSchema"]["properties"]["restore_clipboard"]["type"] == "boolean"
-    assert tools[0]["inputSchema"]["properties"]["related_to"]["type"] == "string"
-    assert "begin" in tools[0]["inputSchema"]["properties"]["session_action"]["enum"]
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["show_cursor"]["type"] == "boolean"
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["show_cursor"]["default"] is False
+    assert "agent" in tools_by_name["computer"]["inputSchema"]["properties"]["cursor_source"]["enum"]
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["cursor_source"]["default"] == "none"
+    assert "keys" in tools_by_name["computer"]["inputSchema"]["properties"]["method"]["enum"]
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["prefer_related"]["type"] == "boolean"
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["restore_clipboard"]["type"] == "boolean"
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["related_to"]["type"] == "string"
+    assert "begin" in tools_by_name["computer"]["inputSchema"]["properties"]["session_action"]["enum"]
+
+    assert tools_by_name["get_app_state"]["inputSchema"]["required"] == ["app"]
+    assert tools_by_name["click"]["inputSchema"]["properties"]["element_index"]["type"] == "string"
+    assert tools_by_name["click"]["inputSchema"]["properties"]["x"]["type"] == "number"
+    assert tools_by_name["drag"]["inputSchema"]["required"] == ["app", "from_x", "from_y", "to_x", "to_y"]
+    assert tools_by_name["press_key"]["inputSchema"]["properties"]["key"]["type"] == "string"
+    assert tools_by_name["set_value"]["inputSchema"]["required"] == ["app", "element_index", "value"]
     return 0
 
 

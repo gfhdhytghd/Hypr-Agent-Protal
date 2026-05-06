@@ -33,6 +33,7 @@
 #include <iterator>
 #include <limits>
 #include <linux/input-event-codes.h>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <sstream>
@@ -890,6 +891,15 @@ uint32_t nowMs() {
     return static_cast<uint32_t>(Time::millis(Time::steadyNow()) & 0xFFFFFFFFU);
 }
 
+void removePointerTimer(const SP<CEventLoopTimer>& self) {
+    if (g_pEventLoopManager)
+        g_pEventLoopManager->removeTimer(self);
+
+    g_pointerRestoreTimers.erase(
+        std::remove_if(g_pointerRestoreTimers.begin(), g_pointerRestoreTimers.end(), [&self](const auto& item) { return item.get() == self.get(); }),
+        g_pointerRestoreTimers.end());
+}
+
 struct TargetSurface {
     PHLWINDOW              window;
     SP<CWLSurfaceResource> surface;
@@ -1247,7 +1257,8 @@ SDispatchResult dispatchPointer(const std::string& args) {
 
     const auto parts = splitCsv(args);
     if (parts.size() < 4)
-        return {.success = false, .error = "usage: hypr-agent-protal:pointer <window-regex>,<global-x>,<global-y>,<move|click|press|release>[,<button>]"};
+        return {.success = false,
+                .error = "usage: hypr-agent-protal:pointer <window-regex>,<global-x>,<global-y>,<move|click|press|release|drag>[,<button>][,<drag-x>,<drag-y>,<duration-sec>]"};
 
     const auto x = parseDouble(parts[1]);
     const auto y = parseDouble(parts[2]);
@@ -1283,6 +1294,109 @@ SDispatchResult dispatchPointer(const std::string& args) {
         sendPointerScroll(*dx, *dy);
         showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
+        return {.success = true};
+    }
+
+    if (action == "drag") {
+        if (parts.size() < 7)
+            return {.success = false, .error = "drag requires destination x and y"};
+        const auto x2 = parseDouble(parts[5]);
+        const auto y2 = parseDouble(parts[6]);
+        const auto duration = parts.size() >= 8 ? parseDouble(parts[7]) : std::optional<double>{0.2};
+        if (!x2 || !y2 || !duration)
+            return {.success = false, .error = "drag destination and duration must be finite numbers"};
+
+        g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
+        g_pSeatManager->sendPointerFrame();
+
+        const double durationSec = std::clamp(*duration, 0.0, 3.0);
+        const int    steps       = std::clamp(static_cast<int>(std::round(std::max(0.05, durationSec) * 60.0)), 4, 60);
+
+        if (g_pEventLoopManager && durationSec > 0.0) {
+            struct DragState {
+                std::string                  selector;
+                Vector2D                     end;
+                uint32_t                     button = 0;
+                SP<CWLSurfaceResource>       previousSurface;
+                Vector2D                     previousLocal;
+                std::optional<TargetSurface> lastTarget;
+            };
+
+            auto state = std::make_shared<DragState>();
+            state->selector = parts[0];
+            state->end = Vector2D{*x2, *y2};
+            state->button = *button;
+            state->previousSurface = restore.previousSurface;
+            state->previousLocal = restore.previousLocal;
+            state->lastTarget = *target;
+            restore.restored = true;
+
+            const int durationMs = std::max(1, static_cast<int>(std::round(durationSec * 1000.0)));
+            for (int step = 1; step <= steps; ++step) {
+                const double   t = static_cast<double>(step) / static_cast<double>(steps);
+                const Vector2D global{*x + ((*x2 - *x) * t), *y + ((*y2 - *y) * t)};
+                const int      delayMs = std::max(1, static_cast<int>(std::round(durationMs * t)));
+                auto           timer = makeShared<CEventLoopTimer>(
+                    std::chrono::milliseconds(delayMs),
+                    [state, global](SP<CEventLoopTimer> self, void*) {
+                        if (g_pSeatManager) {
+                            const auto stepTarget = resolveTargetSurface(state->selector, global);
+                            if (stepTarget) {
+                                state->lastTarget = *stepTarget;
+                                g_pSeatManager->setPointerFocus(stepTarget->surface, stepTarget->local);
+                                g_pSeatManager->sendPointerMotion(nowMs(), stepTarget->local);
+                                g_pSeatManager->sendPointerFrame();
+                            }
+                        }
+                        removePointerTimer(self);
+                    },
+                    nullptr);
+                g_pointerRestoreTimers.push_back(timer);
+                g_pEventLoopManager->addTimer(timer);
+            }
+
+            auto releaseTimer = makeShared<CEventLoopTimer>(
+                std::chrono::milliseconds(durationMs + 1),
+                [state](SP<CEventLoopTimer> self, void*) {
+                    if (g_pSeatManager && state->lastTarget) {
+                        const auto target = *state->lastTarget;
+                        g_pSeatManager->setPointerFocus(target.surface, target.local);
+                        g_pSeatManager->sendPointerMotion(nowMs(), target.local);
+                        g_pSeatManager->sendPointerButton(nowMs(), state->button, WL_POINTER_BUTTON_STATE_RELEASED);
+                        g_pSeatManager->sendPointerFrame();
+                        showAgentIndicator(target.window, state->end, "drag");
+
+                        if (target.window && target.window->m_isX11) {
+                            g_pSeatManager->m_state.pointerFocus.reset();
+                            g_pSeatManager->m_state.pointerFocusResource.reset();
+                        }
+                        g_pSeatManager->setPointerFocus(state->previousSurface, state->previousLocal);
+                        g_pSeatManager->sendPointerFrame();
+                    }
+                    removePointerTimer(self);
+                },
+                nullptr);
+            g_pointerRestoreTimers.push_back(releaseTimer);
+            g_pEventLoopManager->addTimer(releaseTimer);
+            return {.success = true};
+        }
+
+        TargetSurface lastTarget = *target;
+        for (int step = 1; step <= steps; ++step) {
+            const double   t = static_cast<double>(step) / static_cast<double>(steps);
+            const Vector2D global{*x + ((*x2 - *x) * t), *y + ((*y2 - *y) * t)};
+            const auto     stepTarget = resolveTargetSurface(parts[0], global);
+            if (!stepTarget)
+                continue;
+            lastTarget = *stepTarget;
+            g_pSeatManager->setPointerFocus(lastTarget.surface, lastTarget.local);
+            g_pSeatManager->sendPointerMotion(nowMs(), lastTarget.local);
+            g_pSeatManager->sendPointerFrame();
+        }
+        g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
+        g_pSeatManager->sendPointerFrame();
+        showAgentIndicator(lastTarget.window, Vector2D{*x2, *y2}, action);
+        restore.restoreForTarget(lastTarget);
         return {.success = true};
     }
 
@@ -1572,7 +1686,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.2.9",
+        .version = "0.3.0",
     };
 }
 

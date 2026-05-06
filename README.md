@@ -8,6 +8,7 @@ It exposes four compositor dispatchers:
 hyprctl dispatch hypr-agent-protal:screenshot /tmp/hypr-agent-protal-session.json
 hyprctl dispatch hypr-agent-protal:screenshot '/tmp/hypr-agent-protal-session.json,address:0x1234'
 hyprctl dispatch hypr-agent-protal:pointer 'address:0x1234,930,520,click,left'
+hyprctl dispatch hypr-agent-protal:pointer 'address:0x1234,930,520,drag,left,1180,760,0.2'
 hyprctl dispatch hypr-agent-protal:keyboard 'address:0x1234,tap,v,ctrl'
 hyprctl dispatch hypr-agent-protal:session 'begin,address:0x1234'
 ```
@@ -43,13 +44,21 @@ The repository includes a Codex plugin manifest and a stdio MCP server:
 python3 mcp/hypr-agent-protal-mcp.py
 ```
 
-The MCP server exposes one tool named `computer` with these actions:
+The MCP server exposes the compatibility tool `computer` plus Codex-style app-state tools:
+
+- `list_apps`: lists running Hyprland windows with stable selectors, classes, titles, pid, workspace, geometry, and XWayland status.
+- `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback.
+- `click`, `scroll`, `drag`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot pixel coordinates plus the native background input dispatchers.
+
+The app-state coordinate contract matches the screenshot returned by `get_app_state`: `x`, `y`, `from_x`, `from_y`, `to_x`, and `to_y` are screenshot pixels, not Hyprland global logical coordinates. The MCP bridge converts them back to the target window's global logical coordinates before dispatch.
+
+The compatibility `computer` tool still exposes these lower-level actions:
 
 - `screenshot`: captures compositor screenshots and returns PNG image content plus metadata. Pass `target` for unoccluded target-window capture. Screenshot cursor drawing is a debug option and is off by default; use `show_cursor=true` or `cursor_source` values `auto`, `agent`, `hyprland`, `none` to draw it into the returned PNG.
 - `windows`: lists Hyprland clients with addresses, classes, titles, geometry, and workspace data. Pass `related_to` to return the selected client plus same-process related windows such as XWayland popups.
 - `move`, `click`, `doubleclick`, `press`, `release`: sends pointer input to a target window selector such as `address:0x1234`.
 - `scroll`: sends wheel axis events to a target window.
-- `drag`: presses, moves, and releases on the target window.
+- `drag`: presses, moves, and releases on the target window through the native pointer dispatcher.
 - `key`: sends a shortcut such as `ctrl+v`, `enter`, or `escape` to a target window. It also accepts raw evdev keycodes through `keycode` for ydotool-style fallback.
 - `type`: sends text to the target input. Use `method` values `auto`, `keys`, or `paste`; by default it types short ASCII text as key events and uses clipboard paste for Unicode or longer text.
 - `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
@@ -57,6 +66,7 @@ The MCP server exposes one tool named `computer` with these actions:
 - `copy_text`: writes text to the clipboard without sending input.
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
+- `doctor`: reports AT-SPI/session diagnostics and target accessibility environment hints.
 
 The command-line bridge is also usable directly:
 
@@ -68,6 +78,7 @@ scripts/hypr-agent-protalctl windows
 scripts/hypr-agent-protalctl windows --related-to 'address:0x1234'
 scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 click left
 scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 scroll -3
+scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 drag left 1180 760 --duration 0.2
 scripts/hypr-agent-protalctl keyboard 'address:0x1234' tap v ctrl
 scripts/hypr-agent-protalctl keyboard 'address:0x1234' tap 28
 scripts/hypr-agent-protalctl session begin 'address:0x1234'
