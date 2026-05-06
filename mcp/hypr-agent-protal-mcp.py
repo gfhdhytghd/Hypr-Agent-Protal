@@ -14,7 +14,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.1"
+SERVER_VERSION = "0.3.2"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -74,17 +74,17 @@ COMPUTER_SCHEMA: dict[str, Any] = {
             ],
             "description": "Computer use action to perform.",
         },
-        "app": {"type": "string", "description": "App/window selector for compatibility aliases that use screenshot/window-relative coordinates."},
+        "app": {"type": "string", "description": "Preferred app/window selector for semantic tools and compatibility aliases. Use this instead of target/global coordinates when possible."},
         "target": {
             "type": "string",
-            "description": "Hyprland window selector, for example address:0x1234. Optional for screenshot; required for input actions.",
+            "description": "Low-level Hyprland window selector, for example address:0x1234. Prefer app plus screenshot/window-relative coordinates unless you intentionally need global-coordinate fallback.",
         },
         "coordinate": {
             "type": "array",
             "items": {"type": "number"},
             "minItems": 2,
             "maxItems": 2,
-            "description": "Compatibility coordinate pair. With app, interpreted in coordinate_space; with target, treated as global logical coordinates.",
+            "description": "Compatibility coordinate pair. With app, interpreted in coordinate_space; with target and no app, treated as low-level global logical coordinates.",
         },
         "start_coordinate": {
             "type": "array",
@@ -97,7 +97,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["screenshot", "window", "global"],
             "default": "screenshot",
-            "description": "Coordinate space for app-relative compatibility aliases. Global is only for the legacy computer tool.",
+            "description": "Coordinate space for app-relative compatibility aliases. Prefer screenshot pixels from get_app_state. Global is only for low-level computer fallback.",
         },
         "x": {"type": "number", "description": "Global logical X coordinate."},
         "y": {"type": "number", "description": "Global logical Y coordinate."},
@@ -228,18 +228,18 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "computer",
             "title": "hypr-agent-protal",
-            "description": "Compatibility tool for Hyprland screenshots and background pointer, keyboard, scroll, drag, and clipboard paste actions.",
+            "description": "hypr-agent-protal compatibility tool for Hyprland background Computer Use. Prefer app plus get_app_state/screenshot coordinates; target/x/y global coordinates are only the low-level fallback. Do not use the obsolete hyprcum namespace.",
             "inputSchema": COMPUTER_SCHEMA,
         },
         {
             "name": "list_apps",
-            "description": "List running Hyprland apps/windows available to Computer Use.",
+            "description": "List running Hyprland apps/windows available to hypr-agent-protal. Start here before choosing a target app.",
             "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema({}),
         },
         {
             "name": "get_app_state",
-            "description": "Get a target app/window screenshot and accessibility tree. Call this before action tools.",
+            "description": "Get a target app/window screenshot and accessibility tree. Call this before action tools, then use element_index or screenshot/window-relative coordinates.",
             "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema({"app": app}, ["app"]),
         },
@@ -251,7 +251,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "screenshot",
-            "description": "Compatibility alias: capture a screenshot for an app/window, or the visible compositor if no app is passed.",
+            "description": "Capture an unoccluded screenshot for an app/window, or the visible compositor if no app is passed. Prefer app over low-level target.",
             "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema(screenshot_props),
         },

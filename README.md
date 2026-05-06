@@ -2,6 +2,11 @@
 
 hypr-agent-protal is an experimental Hyprland plugin plus MCP bridge for background agent control.
 
+`hyprcum` was the old pre-rename prototype. New Codex sessions should use only
+the `hypr-agent-protal` MCP server/namespace and Hyprland dispatchers. If both
+`mcp__hypr_agent_protal__` and `mcp__hyprcum__` are visible, the Codex
+configuration is stale; disable or remove the old `hyprcum` plugin/server.
+
 It exposes four compositor dispatchers:
 
 ```ini
@@ -43,6 +48,20 @@ The repository includes a Codex plugin manifest and a stdio MCP server:
 ```sh
 python3 mcp/hypr-agent-protal-mcp.py
 ```
+
+Recommended agent workflow:
+
+1. Call `list_apps` first and select the target app/window.
+2. Call `get_app_state` for semantic state, or `screenshot` with `app` for an
+   image-only refresh.
+3. Prefer `element_index` from `get_app_state`. When coordinates are needed,
+   use `coordinate_space=screenshot` with screenshot pixels, or
+   `coordinate_space=window` with target-window-relative logical coordinates.
+4. Use `computer` with `target` and global `x/y` only as a low-level fallback.
+
+Avoid the obsolete `hyprcum` MCP server and namespace. Its tool schema lacks the
+new app-state, screenshot-relative coordinates, related-window session handling,
+cursor-position support, and Codex compatibility aliases.
 
 The MCP server exposes the compatibility tool `computer` plus Codex-style app-state tools:
 

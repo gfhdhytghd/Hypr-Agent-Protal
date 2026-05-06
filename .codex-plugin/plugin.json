@@ -1,14 +1,14 @@
 {
   "name": "hypr-agent-protal",
-  "version": "0.3.1",
-  "description": "Hyprland background screenshot, input, clipboard, and app-state MCP bridge",
+  "version": "0.3.2",
+  "description": "hypr-agent-protal MCP only. Hyprland background screenshot, input, clipboard, and app-state bridge. Do not use the obsolete hyprcum server.",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "hypr-agent-protal",
-    "shortDescription": "Background agents for Hyprland",
+    "shortDescription": "Hyprland background Computer Use",
     "developerName": "wilf",
     "category": "Developer Tools",
     "capabilities": ["mcp", "computer-use"],
-    "defaultPrompt": "Use the Hyprland Computer Use tools for app-state snapshots, window discovery, target-window pointer/keyboard input, scrolling, dragging, value setting, and clipboard paste."
+    "defaultPrompt": "Use only the hypr-agent-protal MCP server/namespace; hyprcum is the obsolete pre-rename server and should not be used. Start with list_apps, choose the target app/window, then call get_app_state or screenshot with app. Prefer element_index or screenshot/window-relative coordinates. Use global target/x/y only as a low-level computer fallback."
   }
 }
