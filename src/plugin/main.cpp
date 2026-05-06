@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 #include <linux/input-event-codes.h>
 #include <optional>
 #include <sstream>
@@ -309,13 +310,58 @@ CBox windowMainSurfaceGoalBox(const PHLWINDOW& window) {
                 window->m_realSize ? window->m_realSize->goal().y : window->m_size.y};
 }
 
+bool sameXWaylandClientFamily(const PHLWINDOW& root, const PHLWINDOW& candidate) {
+    if (!root || !candidate || root == candidate || !root->m_isX11 || !candidate->m_isX11)
+        return false;
+
+    const auto transientFor = candidate->x11TransientFor();
+    if (transientFor && transientFor == root)
+        return true;
+
+    const auto rootPid = root->getPID();
+    const auto candidatePid = candidate->getPID();
+    if (rootPid <= 0 || candidatePid != rootPid)
+        return false;
+
+    if (!root->m_class.empty() && root->m_class == candidate->m_class)
+        return true;
+    return !root->m_initialClass.empty() && root->m_initialClass == candidate->m_initialClass;
+}
+
+PHLWINDOW xwaylandRelatedWindowAt(const PHLWINDOW& root, const Vector2D& globalPos) {
+    if (!g_pCompositor || !root || !root->m_isX11)
+        return root;
+
+    PHLWINDOW best = root;
+    double    bestArea = std::numeric_limits<double>::infinity();
+
+    for (const auto& candidate : g_pCompositor->m_windows) {
+        if (!candidate || !candidate->m_isMapped || candidate->isHidden() || !sameXWaylandClientFamily(root, candidate))
+            continue;
+
+        const auto box = windowMainSurfaceGoalBox(candidate);
+        if (!box.containsPoint(globalPos))
+            continue;
+
+        const double area = std::max(1.0, box.w) * std::max(1.0, box.h);
+        if (area < bestArea) {
+            best = candidate;
+            bestArea = area;
+        }
+    }
+
+    return best;
+}
+
 std::optional<TargetSurface> resolveTargetSurface(const std::string& targetRegex, const Vector2D& globalPos) {
     if (!g_pCompositor)
         return std::nullopt;
 
-    const auto window = g_pCompositor->getWindowByRegex(targetRegex);
+    auto window = g_pCompositor->getWindowByRegex(targetRegex);
     if (!window || !window->m_isMapped)
         return std::nullopt;
+
+    window = xwaylandRelatedWindowAt(window, globalPos);
 
     if (window->m_isX11) {
         if (!window->wlSurface() || !window->wlSurface()->resource())

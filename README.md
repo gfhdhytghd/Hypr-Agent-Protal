@@ -13,7 +13,7 @@ hyprctl dispatch HyprCUM:keyboard 'address:0x1234,tap,v,ctrl'
 
 The screenshot dispatcher renders active monitor workspaces into RGBA artifacts from inside Hyprland, then writes a JSON session file. When a window selector is supplied, it renders that window directly into an offscreen framebuffer, so the artifact is not occluded by other windows. The pointer dispatcher resolves the target with `g_pCompositor->getWindowByRegex()`, focuses the target surface only for the injected pointer events, sends motion/button/frame events through `g_pSeatManager`, then restores the previous pointer focus.
 
-For XWayland windows, the dispatcher sends to the main `wlSurface()` resource and scales surface-local coordinates by `m_X11SurfaceScaledBy`. For native Wayland windows, it uses `vectorWindowToSurface(globalPos, window, localPos)` so subsurfaces receive local coordinates.
+For XWayland windows, the dispatcher sends to the `wlSurface()` resource and scales surface-local coordinates by `m_X11SurfaceScaledBy`. If the requested global coordinate lands on a same-process XWayland helper window, such as a search popup, pointer and keyboard dispatch are automatically routed to that related window. For native Wayland windows, it uses `vectorWindowToSurface(globalPos, window, localPos)` so subsurfaces receive local coordinates.
 
 The keyboard dispatcher temporarily focuses the target surface, sends key events and modifier state through `g_pSeatManager`, then restores the previous keyboard focus. The MCP layer uses that for shortcuts and text/file/image paste flows.
 
@@ -43,7 +43,7 @@ python3 mcp/hyprcum_mcp.py
 The MCP server exposes one tool named `computer` with these actions:
 
 - `screenshot`: captures compositor screenshots and returns PNG image content plus metadata. Pass `target` for unoccluded target-window capture.
-- `windows`: lists Hyprland clients with addresses, classes, titles, geometry, and workspace data.
+- `windows`: lists Hyprland clients with addresses, classes, titles, geometry, and workspace data. Pass `related_to` to return the selected client plus same-process related windows such as XWayland popups.
 - `move`, `click`, `doubleclick`, `press`, `release`: sends pointer input to a target window selector such as `address:0x1234`.
 - `scroll`: sends wheel axis events to a target window.
 - `drag`: presses, moves, and releases on the target window.
@@ -58,6 +58,7 @@ The command-line bridge is also usable directly:
 scripts/hyprcumctl screenshot --base64
 scripts/hyprcumctl screenshot --target 'address:0x1234' --base64
 scripts/hyprcumctl windows
+scripts/hyprcumctl windows --related-to 'address:0x1234'
 scripts/hyprcumctl pointer 'address:0x1234' 930 520 click left
 scripts/hyprcumctl pointer 'address:0x1234' 930 520 scroll -3
 scripts/hyprcumctl keyboard 'address:0x1234' tap v ctrl

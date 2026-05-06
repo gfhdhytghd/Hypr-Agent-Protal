@@ -4,6 +4,7 @@ import base64
 import json
 import os
 import pathlib
+import re
 import struct
 import subprocess
 import sys
@@ -210,6 +211,13 @@ def windows(args: argparse.Namespace) -> int:
         return result.returncode or 1
 
     clients = json.loads(result.stdout or "[]")
+    related_to = None
+    if args.related_to:
+        related_to = next((client for client in clients if selector_matches(client, args.related_to)), None)
+        if related_to is None:
+            print(f"related target not found: {args.related_to}", file=sys.stderr)
+            return 1
+
     if args.visible_workspace:
         active = hyprctl("activeworkspace", "-j")
         workspace = None
@@ -218,8 +226,55 @@ def windows(args: argparse.Namespace) -> int:
         if workspace is not None:
             clients = [c for c in clients if (c.get("workspace") or {}).get("id") == workspace]
 
+    if related_to is not None:
+        clients = [annotate_relation(client, related_to) for client in clients if is_related_window(client, related_to)]
+
     print(json.dumps({"windows": clients}, ensure_ascii=False))
     return 0
+
+
+def selector_matches(client: dict, selector: str) -> bool:
+    selector = selector.strip()
+    if selector.startswith("address:"):
+        return str(client.get("address", "")).lower() == selector.split(":", 1)[1].lower()
+    haystack = "\n".join(str(client.get(key, "")) for key in ["address", "class", "title", "initialClass", "initialTitle"])
+    try:
+        return re.search(selector, haystack) is not None
+    except re.error:
+        return selector in haystack
+
+
+def is_related_window(client: dict, target: dict) -> bool:
+    if client.get("address") == target.get("address"):
+        return True
+    if not client.get("mapped", True) or client.get("hidden", False):
+        return False
+    if client.get("pid") and client.get("pid") == target.get("pid"):
+        if client.get("class") and client.get("class") == target.get("class"):
+            return True
+        if client.get("initialClass") and client.get("initialClass") == target.get("initialClass"):
+            return True
+    return False
+
+
+def annotate_relation(client: dict, target: dict) -> dict:
+    annotated = dict(client)
+    if client.get("address") == target.get("address"):
+        annotated["hyprcumRelation"] = "self"
+        return annotated
+
+    annotated["hyprcumRelation"] = "related"
+    tx, ty = target.get("at") or [0, 0]
+    tw, th = target.get("size") or [0, 0]
+    x, y = client.get("at") or [0, 0]
+    w, h = client.get("size") or [0, 0]
+    target_area = max(1.0, float(tw) * float(th))
+    area = max(1.0, float(w) * float(h))
+    if area < target_area * 0.6 and x >= tx - 64 and y >= ty - 64 and x <= tx + tw + 64 and y <= ty + th + 64:
+        annotated["hyprcumWindowKind"] = "popup"
+    else:
+        annotated["hyprcumWindowKind"] = "related"
+    return annotated
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -257,6 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     win = sub.add_parser("windows", help="list Hyprland windows")
     win.add_argument("--visible-workspace", action="store_true", help="only return clients on the active workspace")
+    win.add_argument("--related-to", help="only return the selected window and same-process related windows")
     win.set_defaults(func=windows)
 
     return parser

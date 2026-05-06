@@ -76,6 +76,10 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "path": {"type": "string", "description": "Filesystem path for paste_file/paste_image actions."},
         "duration": {"type": "number", "description": "Duration in seconds for wait or drag pacing."},
         "visible_workspace": {"type": "boolean", "description": "For windows, only return active-workspace clients."},
+        "related_to": {
+            "type": "string",
+            "description": "For windows, return the selected Hyprland window and same-process related windows such as XWayland popups.",
+        },
     },
     "required": ["action"],
     "additionalProperties": False,
@@ -148,7 +152,7 @@ def set_clipboard_text(text: str) -> list[str]:
     methods: list[str] = []
     if run_available("wl-copy", ["--type", "text/plain;charset=utf-8"], input_text=text):
         methods.append("wl-copy:text")
-    if run_available("xclip", ["-selection", "clipboard", "-t", "text/plain;charset=utf-8"], input_text=text):
+    if run_available("xclip", ["-selection", "clipboard"], input_text=text):
         methods.append("xclip:text")
     if not methods:
         raise RuntimeError("no clipboard writer found")
@@ -243,6 +247,9 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
         cmd = ["windows"]
         if args.get("visible_workspace"):
             cmd.append("--visible-workspace")
+        related_to = args.get("related_to")
+        if isinstance(related_to, str) and related_to:
+            cmd.extend(["--related-to", related_to])
         return result_text(call_ctl(cmd))
 
     if action in {"move", "click", "doubleclick", "press", "release"}:

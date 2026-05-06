@@ -53,6 +53,7 @@ def main() -> int:
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "wait"]:
         assert action in actions
     assert tools[0]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
+    assert tools[0]["inputSchema"]["properties"]["related_to"]["type"] == "string"
     return 0
 
 

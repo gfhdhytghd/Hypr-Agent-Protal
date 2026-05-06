@@ -543,12 +543,15 @@ Json windowJson(const PHLWINDOW& window) {
                  window->m_realSize ? window->m_realSize->goal().x : window->m_size.x,
                  window->m_realSize ? window->m_realSize->goal().y : window->m_size.y};
     const auto full = window->getFullWindowBoundingBox();
+    const auto transientFor = window->m_isX11 ? window->x11TransientFor() : PHLWINDOW{};
 
     return Json{
         {"address", "0x" + pointerId(window.get())},
         {"title", boundedString(window->m_title, 4096)},
         {"class", boundedString(window->m_class, 4096)},
         {"initialClass", boundedString(window->m_initialClass, 4096)},
+        {"pid", window->getPID()},
+        {"transientFor", transientFor ? Json("0x" + pointerId(transientFor.get())) : Json(nullptr)},
         {"visible", isWindowVisible(window)},
         {"xwayland", window->m_isX11},
         {"geometry", rectJson(visible)},
