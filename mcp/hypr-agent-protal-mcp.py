@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.15"
+SERVER_VERSION = "0.3.16"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -301,7 +301,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "get_app_state",
-            "description": "Get a target app/window screenshot and accessibility tree. Call this before action tools, then use element_index or screenshot/window-relative coordinates.",
+            "description": "Get a target app/window screenshot, accessibility tree, and uiHints. Call this before action tools, then use element_index or screenshot/window-relative coordinates. uiHints separates AT-SPI menu entries from tab/ribbon/toolbar controls; do not substitute a same-named menu for a requested tab.",
             "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema({"app": app}, ["app"]),
         },
@@ -1941,6 +1941,48 @@ def best_scroll_element(snapshot: dict[str, Any], direction: str) -> dict[str, A
     return candidates[0][2]
 
 
+def element_hint_record(element: dict[str, Any]) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "index": element.get("index"),
+        "name": str(element.get("name") or ""),
+        "controlType": str(element.get("controlType") or element.get("localizedControlType") or ""),
+    }
+    frame = element.get("frame")
+    if isinstance(frame, dict):
+        record["frame"] = frame
+    actions = element.get("actions")
+    if isinstance(actions, list) and actions:
+        record["actions"] = [str(action) for action in actions[:8]]
+    return record
+
+
+def ui_hints_for_elements(snapshot: dict[str, Any], elements: list[dict[str, Any]]) -> dict[str, Any]:
+    hints: dict[str, Any] = {
+        "notes": [
+            "AT-SPI roles are toolkit descriptions, not visual intent. A controlType of menu means a menu entry reported by the app/toolkit; it is not the same as a tab/ribbon page even when the visible label matches.",
+            "When the requested action is to switch a tab/ribbon/page, prefer visible elements whose controlType contains tab/page tab or toolbar controls exposed after that tab. If no tab element is exposed, use screenshot/window-relative coordinates on the visible tab label, then refresh get_app_state.",
+        ],
+        "visibleMenus": [],
+        "visibleTabs": [],
+        "visibleToolbars": [],
+    }
+    for element in elements:
+        if not isinstance(element, dict) or not element_is_visible(snapshot, element):
+            continue
+        role = element_role(element)
+        if role == "menu":
+            hints["visibleMenus"].append(element_hint_record(element))
+        elif "tab" in role or role in {"page tab", "page tab list"}:
+            hints["visibleTabs"].append(element_hint_record(element))
+        elif role in {"tool bar", "toolbar"} or "tool bar" in role or "toolbar" in role:
+            hints["visibleToolbars"].append(element_hint_record(element))
+    for key in ("visibleMenus", "visibleTabs", "visibleToolbars"):
+        if len(hints[key]) > 24:
+            hints[key] = hints[key][:24]
+            hints[f"{key}Truncated"] = True
+    return hints
+
+
 def atspi_insert_text_isolated(snapshot: dict[str, Any], text: str) -> bool:
     result = atspi_child_action("insert_text", snapshot.get("window") or {}, text=text)
     return bool(result.get("ok"))
@@ -2431,6 +2473,7 @@ def build_app_snapshot(app_query: str) -> dict[str, Any]:
         "elements": elements,
         "accessibility": {k: v for k, v in atspi.items() if k not in {"elements", "treeLines"}},
     }
+    snapshot["uiHints"] = ui_hints_for_elements(snapshot, elements)
     if related_error:
         snapshot["relatedWindowsError"] = related_error
     remember_snapshot(app_query, snapshot)
@@ -2475,6 +2518,33 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
             )
     elif snapshot.get("relatedWindowsError"):
         lines.extend(["", f"Related windows: unavailable. {snapshot.get('relatedWindowsError')}"])
+    ui_hints = snapshot.get("uiHints") or {}
+    hint_notes = ui_hints.get("notes") or []
+    if hint_notes:
+        lines.extend(["", "UI hints:"])
+        lines.extend(f"- {note}" for note in hint_notes)
+    for label, key in (("Visible tab-like controls", "visibleTabs"), ("Visible menu controls", "visibleMenus"), ("Visible toolbars", "visibleToolbars")):
+        controls = ui_hints.get(key) or []
+        if controls:
+            lines.append(f"{label}:")
+            for control in controls[:8]:
+                frame = control.get("frame") or {}
+                frame_text = ""
+                if isinstance(frame, dict):
+                    frame_text = " Frame: {{x: {0}, y: {1}, width: {2}, height: {3}}}".format(
+                        round(float(frame.get("x") or 0.0)),
+                        round(float(frame.get("y") or 0.0)),
+                        round(float(frame.get("width") or 0.0)),
+                        round(float(frame.get("height") or 0.0)),
+                    )
+                lines.append(
+                    "- {0} {1} {2}{3}".format(
+                        control.get("index"),
+                        control.get("controlType") or "element",
+                        control.get("name") or "",
+                        frame_text,
+                    ).rstrip()
+                )
     lines.extend(str(line) for line in snapshot.get("treeLines") or [])
     accessibility = snapshot.get("accessibility") or {}
     if accessibility.get("treeTruncated"):

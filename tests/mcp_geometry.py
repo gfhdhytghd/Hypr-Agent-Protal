@@ -125,6 +125,22 @@ def main() -> int:
     center = mcp.visible_element_center(scroll_snapshot, scroll_element)
     near(center[0], 1438.5)
     near(center[1], 1024.5)
+
+    hints_snapshot = {
+        "screenshot": {"width": 1000, "height": 600},
+    }
+    hints = mcp.ui_hints_for_elements(
+        hints_snapshot,
+        [
+            {"index": 1, "source": "atspi", "controlType": "menu", "name": "Insert", "frame": {"x": 100.0, "y": 0.0, "width": 80.0, "height": 36.0}},
+            {"index": 2, "source": "atspi", "controlType": "page tab", "name": "Insert", "frame": {"x": 200.0, "y": 0.0, "width": 90.0, "height": 36.0}},
+            {"index": 3, "source": "atspi", "controlType": "tool bar", "name": "Formatting", "frame": {"x": 0.0, "y": 40.0, "width": 1000.0, "height": 80.0}},
+        ],
+    )
+    assert hints["visibleMenus"][0]["index"] == 1
+    assert hints["visibleTabs"][0]["index"] == 2
+    assert hints["visibleToolbars"][0]["index"] == 3
+    assert "not the same as a tab" in hints["notes"][0]
     return 0
 
 
