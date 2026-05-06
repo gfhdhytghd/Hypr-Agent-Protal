@@ -501,15 +501,13 @@ bool renderWindowArtifact(const PHLWINDOW& window,
 
     const int cropX = clampedIntFromDouble(renderCropBox.x);
     const int cropY = clampedIntFromDouble(renderCropBox.y);
-    auto      readback = readRgbaFramebufferRegion(framebuffer, 0, 0, framebufferWidth, framebufferHeight);
+    auto      readback = readRgbaFramebufferRegion(framebuffer, cropX, cropY, width, height);
     if (readback.pixels.empty())
         return false;
 
     PixelBounds bounds;
     if (findAlphaBounds(readback, bounds))
         readback = cropReadback(readback, bounds);
-    else
-        readback = readRgbaFramebufferRegion(framebuffer, cropX, cropY, width, height);
     if (readback.pixels.empty())
         return false;
 
