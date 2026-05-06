@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.38"
+SERVER_VERSION = "0.3.39"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
@@ -915,7 +915,13 @@ def begin_related_action_session(target: str) -> dict[str, Any]:
 
 
 def finish_related_action_session(target: str, session_info: dict[str, Any]) -> list[dict[str, Any]]:
-    related_windows = sync_related_session(target, session_info)
+    related_windows: list[dict[str, Any]] = []
+    for attempt in range(6):
+        related_windows = sync_related_session(target, session_info)
+        if related_windows:
+            break
+        if attempt < 5:
+            time.sleep(0.08)
     session_info["active"] = bool(related_windows)
     if not related_windows:
         session_info["end"] = session_action("end", target)

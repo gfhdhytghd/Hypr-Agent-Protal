@@ -362,6 +362,13 @@ CBox renderedWindowBox(const PHLWINDOW& window, CBox box) {
     return box;
 }
 
+CBox inputWindowBox(const PHLWINDOW& window, CBox renderedBox) {
+    if (window->m_workspace && !window->m_pinned)
+        renderedBox.translate(-window->m_workspace->m_renderOffset->value());
+    renderedBox.translate(-window->m_floatingOffset);
+    return renderedBox;
+}
+
 class WindowAnimationGoalOverride {
   public:
     explicit WindowAnimationGoalOverride(const PHLWINDOW& window) : m_window(window) {
@@ -619,10 +626,12 @@ ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJso
         root["target"]["artifactWidth"] = width;
         root["target"]["artifactHeight"] = height;
         root["target"]["artifactTopDown"] = true;
+        const auto inputBox = inputWindowBox(window, artifactBox);
         root["target"]["artifactGeometry"] = rectJson(artifactBox);
+        root["target"]["inputGeometry"] = rectJson(inputBox);
         root["monitors"].push_back(Json{
             {"name", "window:" + boundedString(window->m_title, 4096)},
-            {"geometry", rectJson(artifactBox)},
+            {"geometry", rectJson(inputBox)},
             {"scale", scale},
             {"transform", 0},
             {"artifactPath", artifactPath.string()},
