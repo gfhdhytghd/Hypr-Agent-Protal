@@ -107,7 +107,7 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 
 - `list_apps`: lists running Hyprland windows with stable selectors, classes, titles, pid, workspace, geometry, and XWayland status.
 - `launch_app` / `open_app`: starts apps through Hyprland, applies accessibility environment/flags, waits for a new window, and returns its selector.
-- `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback.
+- `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback. AT-SPI frames are normalized to screenshot pixels, including target-window captures that contain compositor shadow/border margins.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
 - `click`, `scroll`, `drag`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
@@ -117,6 +117,8 @@ The app-state coordinate contract hides Hyprland global logical coordinates from
 ### AT-SPI App State
 
 Linux does not expose a system-wide accessibility model as consistently as macOS Accessibility. `get_app_state` therefore treats AT-SPI as a semantic enhancement on top of compositor screenshots, not as the only source of truth.
+
+The returned tree is limited to the current screen state. Hidden menu subtrees are filtered out, and huge table controls such as spreadsheets are sampled through the AT-SPI table interface so visible cells are returned without walking millions of off-screen cells. If traversal hits a time or record budget, `accessibility.treeTruncated` reports it and coordinate fallback remains available.
 
 Expected coverage:
 

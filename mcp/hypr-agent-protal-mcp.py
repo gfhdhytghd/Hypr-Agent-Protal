@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.7"
+SERVER_VERSION = "0.3.8"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -727,6 +727,16 @@ def window_geometry(window: dict[str, Any]) -> dict[str, float]:
     return {"x": float(at[0] or 0), "y": float(at[1] or 0), "width": float(size[0] or 0), "height": float(size[1] or 0)}
 
 
+def window_origin(snapshot: dict[str, Any]) -> tuple[float, float]:
+    window = snapshot.get("window") or {}
+    geom = window_geometry(window) if isinstance(window, dict) else {}
+    if geom.get("width", 0.0) > 0 and geom.get("height", 0.0) > 0:
+        return float(geom["x"]), float(geom["y"])
+    screenshot = snapshot.get("screenshot") or {}
+    bounds = screenshot.get("logicalBounds") or {}
+    return float(bounds.get("x") or 0.0), float(bounds.get("y") or 0.0)
+
+
 def list_hypr_windows() -> list[dict[str, Any]]:
     windows = call_ctl(["windows"]).get("windows", [])
     return [window for window in windows if isinstance(window, dict) and window.get("mapped", True) and not window.get("hidden", False)]
@@ -984,9 +994,8 @@ def screenshot_point_to_global(snapshot: dict[str, Any], x: float, y: float) -> 
 
 
 def window_point_to_global(snapshot: dict[str, Any], x: float, y: float) -> tuple[float, float]:
-    screenshot = snapshot.get("screenshot") or {}
-    bounds = screenshot.get("logicalBounds") or {}
-    return float(bounds.get("x") or 0.0) + float(x), float(bounds.get("y") or 0.0) + float(y)
+    origin_x, origin_y = window_origin(snapshot)
+    return origin_x + float(x), origin_y + float(y)
 
 
 def point_to_global(snapshot: dict[str, Any], x: float, y: float, coordinate_space: Any = "screenshot") -> tuple[float, float]:
@@ -1037,16 +1046,21 @@ def snapshot_position(snapshot: dict[str, Any], global_x: float, global_y: float
     top = float(bounds.get("y") or 0.0)
     width = float(bounds.get("width") or 0.0)
     height = float(bounds.get("height") or 0.0)
-    window_x = global_x - left
-    window_y = global_y - top
-    screenshot_x = window_x * scale
-    screenshot_y = window_y * scale
+    origin_x, origin_y = window_origin(snapshot)
+    window = snapshot.get("window") or {}
+    geom = window_geometry(window) if isinstance(window, dict) else {}
+    window_width = float(geom.get("width") or width)
+    window_height = float(geom.get("height") or height)
+    window_x = global_x - origin_x
+    window_y = global_y - origin_y
+    screenshot_x = (global_x - left) * scale
+    screenshot_y = (global_y - top) * scale
     screenshot_width = float(screenshot.get("width") or width * scale)
     screenshot_height = float(screenshot.get("height") or height * scale)
     return {
         "window": {"x": window_x, "y": window_y, "coordinateSpace": "window"},
         "screenshot": {"x": screenshot_x, "y": screenshot_y, "coordinateSpace": "screenshot"},
-        "insideWindow": 0 <= window_x <= width and 0 <= window_y <= height,
+        "insideWindow": 0 <= window_x <= window_width and 0 <= window_y <= window_height,
         "insideScreenshot": 0 <= screenshot_x <= screenshot_width and 0 <= screenshot_y <= screenshot_height,
     }
 
@@ -1304,6 +1318,14 @@ def atspi_state_contains(node: Any, state: Any) -> bool:
     return bool(atspi_safe(lambda: state_set.contains(state), False))
 
 
+def atspi_node_is_currently_visible(node: Any, bounds: dict[str, float] | None = None) -> bool:
+    if bounds is None and atspi_child_count(node) == 0:
+        return False
+    if atspi_state_contains(node, _ATSPI.StateType.SHOWING) or atspi_state_contains(node, _ATSPI.StateType.VISIBLE):
+        return True
+    return bounds is not None
+
+
 def atspi_extents(node: Any) -> dict[str, float] | None:
     component = atspi_safe(node.get_component_iface)
     if component is None:
@@ -1311,7 +1333,70 @@ def atspi_extents(node: Any) -> dict[str, float] | None:
     rect = atspi_safe(lambda: _ATSPI.Component.get_extents(component, _ATSPI.CoordType.SCREEN))
     if rect is None or rect.width <= 0 or rect.height <= 0 or rect.width > 100000 or rect.height > 100000:
         return None
+    if abs(float(rect.x)) > 100000 or abs(float(rect.y)) > 100000:
+        return None
     return {"x": float(rect.x), "y": float(rect.y), "width": float(rect.width), "height": float(rect.height)}
+
+
+def rects_overlap(a: dict[str, float], b: dict[str, float], *, margin: float = 0.0) -> bool:
+    return (
+        a["x"] + a["width"] >= b["x"] - margin
+        and b["x"] + b["width"] >= a["x"] - margin
+        and a["y"] + a["height"] >= b["y"] - margin
+        and b["y"] + b["height"] >= a["y"] - margin
+    )
+
+
+def screenshot_axis_scale(screenshot: dict[str, Any], axis: str) -> float:
+    bounds = screenshot.get("logicalBounds") or {}
+    logical_extent = float(bounds.get("width" if axis == "x" else "height") or 0.0)
+    pixel_extent = float(screenshot.get("width" if axis == "x" else "height") or 0.0)
+    if logical_extent > 0 and pixel_extent > 0:
+        return pixel_extent / logical_extent
+    scale = float(screenshot.get("scale") or 1.0)
+    return scale if scale > 0 else 1.0
+
+
+def atspi_bounds_are_global(atspi_window_bounds: dict[str, float] | None, screenshot: dict[str, Any]) -> bool:
+    if atspi_window_bounds is None:
+        return True
+    screenshot_bounds = screenshot.get("logicalBounds") or {}
+    if not all(key in screenshot_bounds for key in ["x", "y", "width", "height"]):
+        return True
+    if float(screenshot_bounds.get("width") or 0.0) <= 0 or float(screenshot_bounds.get("height") or 0.0) <= 0:
+        return True
+    screenshot_rect = {key: float(screenshot_bounds.get(key) or 0.0) for key in ["x", "y", "width", "height"]}
+    return rects_overlap(atspi_window_bounds, screenshot_rect, margin=8.0)
+
+
+def atspi_bounds_to_screenshot_frame(
+    bounds: dict[str, float],
+    atspi_window_bounds: dict[str, float] | None,
+    screenshot: dict[str, Any],
+    hypr_window: dict[str, Any],
+) -> dict[str, float]:
+    screenshot_bounds = screenshot.get("logicalBounds") or {}
+    screenshot_x = float(screenshot_bounds.get("x") or 0.0)
+    screenshot_y = float(screenshot_bounds.get("y") or 0.0)
+    sx = screenshot_axis_scale(screenshot, "x")
+    sy = screenshot_axis_scale(screenshot, "y")
+
+    if atspi_bounds_are_global(atspi_window_bounds, screenshot):
+        logical_x = bounds["x"]
+        logical_y = bounds["y"]
+    else:
+        geom = window_geometry(hypr_window)
+        root_x = float((atspi_window_bounds or {}).get("x") or 0.0)
+        root_y = float((atspi_window_bounds or {}).get("y") or 0.0)
+        logical_x = geom["x"] + bounds["x"] - root_x
+        logical_y = geom["y"] + bounds["y"] - root_y
+
+    return {
+        "x": (logical_x - screenshot_x) * sx,
+        "y": (logical_y - screenshot_y) * sy,
+        "width": bounds["width"] * sx,
+        "height": bounds["height"] * sy,
+    }
 
 
 def atspi_iter_apps() -> list[Any]:
@@ -1413,24 +1498,29 @@ def atspi_numeric_value(node: Any) -> str:
     return "" if current is None else str(current)
 
 
-def atspi_image_frame(node: Any, atspi_window_bounds: dict[str, float] | None, screenshot: dict[str, Any]) -> dict[str, float] | None:
-    bounds = atspi_extents(node)
+def atspi_image_frame(
+    node: Any,
+    bounds: dict[str, float] | None,
+    atspi_window_bounds: dict[str, float] | None,
+    screenshot: dict[str, Any],
+    hypr_window: dict[str, Any],
+) -> dict[str, float] | None:
     if bounds is None:
         return None
     if atspi_window_bounds is None:
         return bounds
-    rel = {
-        "x": bounds["x"] - atspi_window_bounds["x"],
-        "y": bounds["y"] - atspi_window_bounds["y"],
-        "width": bounds["width"],
-        "height": bounds["height"],
-    }
-    sx = float(screenshot.get("width") or 0) / atspi_window_bounds["width"] if atspi_window_bounds["width"] > 0 else float(screenshot.get("scale") or 1)
-    sy = float(screenshot.get("height") or 0) / atspi_window_bounds["height"] if atspi_window_bounds["height"] > 0 else float(screenshot.get("scale") or 1)
-    return {"x": rel["x"] * sx, "y": rel["y"] * sy, "width": rel["width"] * sx, "height": rel["height"] * sy}
+    return atspi_bounds_to_screenshot_frame(bounds, atspi_window_bounds, screenshot, hypr_window)
 
 
-def atspi_record_for(node: Any, index: int, path: list[int], atspi_window_bounds: dict[str, float] | None, screenshot: dict[str, Any]) -> dict[str, Any]:
+def atspi_record_for(
+    node: Any,
+    index: int,
+    path: list[int],
+    bounds: dict[str, float] | None,
+    atspi_window_bounds: dict[str, float] | None,
+    screenshot: dict[str, Any],
+    hypr_window: dict[str, Any],
+) -> dict[str, Any]:
     role = atspi_role(node)
     return {
         "index": index,
@@ -1442,22 +1532,45 @@ def atspi_record_for(node: Any, index: int, path: list[int], atspi_window_bounds
         "className": str(atspi_safe(node.get_toolkit_name, "") or ""),
         "value": atspi_text_value(node) or atspi_numeric_value(node),
         "nativeWindowHandle": 0,
-        "frame": atspi_image_frame(node, atspi_window_bounds, screenshot),
+        "frame": atspi_image_frame(node, bounds, atspi_window_bounds, screenshot, hypr_window),
         "actions": atspi_action_names(node),
         "source": "atspi",
     }
 
 
-def atspi_render_tree(root: Any, root_path: list[int], screenshot: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], dict[str, float] | None]:
+def atspi_render_tree(root: Any, root_path: list[int], screenshot: dict[str, Any], hypr_window: dict[str, Any]) -> tuple[list[dict[str, Any]], list[str], dict[str, float] | None, str]:
     records: list[dict[str, Any]] = []
     lines: list[str] = []
     atspi_window_bounds = atspi_extents(root)
+    deadline = time.monotonic() + 4.5
+    truncated_reason = ""
 
-    def visit(node: Any, depth: int, path: list[int]) -> None:
+    def mark_truncated(reason: str) -> None:
+        nonlocal truncated_reason
+        if not truncated_reason:
+            truncated_reason = reason
+
+    def budget_exhausted() -> bool:
+        if len(records) >= 500:
+            mark_truncated("record-limit")
+            return True
+        if time.monotonic() >= deadline:
+            mark_truncated("time-limit")
+            return True
+        return False
+
+    def visit(node: Any, depth: int, path: list[int], bounds_hint: dict[str, float] | None = None) -> None:
         if node is None or len(records) >= 500 or depth > 64:
+            if len(records) >= 500:
+                mark_truncated("record-limit")
+            return
+        if budget_exhausted():
+            return
+        bounds = bounds_hint if bounds_hint is not None else atspi_extents(node)
+        if depth > 0 and not atspi_node_is_currently_visible(node, bounds):
             return
         index = len(records)
-        record = atspi_record_for(node, index, path, atspi_window_bounds, screenshot)
+        record = atspi_record_for(node, index, path, bounds, atspi_window_bounds, screenshot, hypr_window)
         records.append(record)
 
         role = record["localizedControlType"] or record["controlType"] or "element"
@@ -1475,11 +1588,63 @@ def atspi_render_tree(root: Any, root_path: list[int], screenshot: dict[str, Any
             )
         lines.append(("\t" * (depth + 1)) + f"{index} {role} {title}{value_segment}{actions_segment}{frame_segment}".rstrip())
 
-        for child_index in range(atspi_child_count(node)):
+        if visit_table_cells(node, depth, path, bounds):
+            return
+
+        child_count = min(atspi_child_count(node), 512)
+        for child_index in range(child_count):
+            if budget_exhausted():
+                return
             visit(atspi_child_at(node, child_index), depth + 1, path + [child_index])
 
+    def visit_table_cells(node: Any, depth: int, path: list[int], table_bounds: dict[str, float] | None) -> bool:
+        if table_bounds is None or not bool(atspi_safe(node.is_table, False)):
+            return False
+        table_iface = atspi_safe(node.get_table_iface)
+        if table_iface is None:
+            return False
+
+        max_rows = min(int(atspi_safe(lambda: _ATSPI.Table.get_n_rows(table_iface), 0) or 0), 200)
+        max_cols = min(int(atspi_safe(lambda: _ATSPI.Table.get_n_columns(table_iface), 0) or 0), 200)
+        empty_rows = 0
+        for row in range(max_rows):
+            if budget_exhausted():
+                return True
+            row_visible = False
+            empty_cols = 0
+            for col in range(max_cols):
+                if budget_exhausted():
+                    return True
+                cell = atspi_safe(lambda r=row, c=col: _ATSPI.Table.get_accessible_at(table_iface, r, c))
+                if cell is None:
+                    empty_cols += 1
+                    if col > 0 and empty_cols >= 3:
+                        break
+                    continue
+                cell_bounds = atspi_extents(cell)
+                if cell_bounds is None or not rects_overlap(cell_bounds, table_bounds, margin=1.0):
+                    empty_cols += 1
+                    if col > 0 and empty_cols >= 3:
+                        break
+                    continue
+                row_visible = True
+                empty_cols = 0
+                child_index = atspi_safe(lambda r=row, c=col: _ATSPI.Table.get_index_at(table_iface, r, c))
+                if isinstance(child_index, int) and child_index >= 0:
+                    child_path = path + [child_index]
+                else:
+                    child_path = path + [row, col]
+                visit(cell, depth + 1, child_path, cell_bounds)
+            if row_visible:
+                empty_rows = 0
+            else:
+                empty_rows += 1
+                if row > 0 and empty_rows >= 2:
+                    break
+        return True
+
     visit(root, 0, root_path)
-    return records, lines, atspi_window_bounds
+    return records, lines, atspi_window_bounds, truncated_reason
 
 
 def atspi_resolve_path(app: Any, path: list[Any]) -> Any:
@@ -1591,13 +1756,15 @@ def atspi_snapshot(window: dict[str, Any], screenshot: dict[str, Any]) -> dict[s
     if not resolved:
         return {"status": "not-found", "error": "No matching AT-SPI app/window for this Hyprland client.", "elements": [], "treeLines": [], "windowBounds": None}
     app, window_index, window_node = resolved
-    elements, tree_lines, bounds = atspi_render_tree(window_node, [window_index], screenshot)
+    elements, tree_lines, bounds, truncated_reason = atspi_render_tree(window_node, [window_index], screenshot, window)
     return {
         "status": "ok",
         "appName": atspi_name(app),
         "appPid": atspi_pid(app),
         "windowTitle": atspi_name(window_node),
         "windowBounds": bounds,
+        "treeTruncated": bool(truncated_reason),
+        "treeTruncatedReason": truncated_reason,
         "elements": elements,
         "treeLines": tree_lines,
     }
@@ -2186,7 +2353,7 @@ def build_app_snapshot(app_query: str) -> dict[str, Any]:
     snapshot = {
         "app": app,
         "windowTitle": str(window.get("title") or ""),
-        "windowBounds": screenshot.get("logicalBounds") or window_geometry(window),
+        "windowBounds": window_geometry(window),
         "target": target,
         "window": window,
         "relatedWindows": related_windows,
@@ -2247,6 +2414,8 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
         lines.extend(["", f"Related windows: unavailable. {snapshot.get('relatedWindowsError')}"])
     lines.extend(str(line) for line in snapshot.get("treeLines") or [])
     accessibility = snapshot.get("accessibility") or {}
+    if accessibility.get("treeTruncated"):
+        lines.extend(["", "Accessibility tree truncated: {0}.".format(accessibility.get("treeTruncatedReason") or "limit")])
     if accessibility.get("status") != "ok":
         lines.extend(["", "Accessibility: {0}. {1}".format(accessibility.get("status", "unavailable"), accessibility.get("error", ""))])
     return "\n".join(lines)
