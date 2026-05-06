@@ -1458,7 +1458,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-        restore.restoreForTarget(*target);
+        restore.restoreLater(std::chrono::milliseconds(120), target->window && target->window->m_isX11);
         return {.success = true};
     }
 
@@ -1767,7 +1767,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.14",
+        .version = "0.3.15",
     };
 }
 
