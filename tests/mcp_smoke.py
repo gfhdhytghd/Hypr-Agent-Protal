@@ -52,19 +52,37 @@ def main() -> int:
         "computer",
         "list_apps",
         "get_app_state",
+        "read_app_state",
+        "screenshot",
+        "get_screenshot",
+        "get_cursor_position",
+        "list_windows",
         "click",
         "perform_secondary_action",
         "scroll",
         "drag",
+        "left_click",
+        "right_click",
+        "middle_click",
+        "double_click",
+        "triple_click",
+        "hover",
+        "move_mouse",
+        "left_click_drag",
         "type_text",
+        "type",
         "press_key",
+        "key",
         "set_value",
+        "wait",
     }
     assert set(tools_by_name) == expected_tools
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.0"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.1"
     actions = set(tools_by_name["computer"]["inputSchema"]["properties"]["action"]["enum"])
-    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "doctor"]:
+    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "doctor", "get_cursor_position", "left_click", "left_click_drag", "hover"]:
         assert action in actions
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["coordinate"]["minItems"] == 2
+    assert "window" in tools_by_name["computer"]["inputSchema"]["properties"]["coordinate_space"]["enum"]
     assert tools_by_name["computer"]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
     assert tools_by_name["computer"]["inputSchema"]["properties"]["show_cursor"]["type"] == "boolean"
     assert tools_by_name["computer"]["inputSchema"]["properties"]["show_cursor"]["default"] is False
@@ -77,10 +95,14 @@ def main() -> int:
     assert "begin" in tools_by_name["computer"]["inputSchema"]["properties"]["session_action"]["enum"]
 
     assert tools_by_name["get_app_state"]["inputSchema"]["required"] == ["app"]
+    assert tools_by_name["get_cursor_position"]["inputSchema"]["properties"]["include_global"]["default"] is False
     assert tools_by_name["click"]["inputSchema"]["properties"]["element_index"]["type"] == "string"
-    assert tools_by_name["click"]["inputSchema"]["properties"]["x"]["type"] == "number"
-    assert tools_by_name["drag"]["inputSchema"]["required"] == ["app", "from_x", "from_y", "to_x", "to_y"]
+    assert tools_by_name["click"]["inputSchema"]["properties"]["coordinate"]["minItems"] == 2
+    assert "window" in tools_by_name["click"]["inputSchema"]["properties"]["coordinate_space"]["enum"]
+    assert tools_by_name["drag"]["inputSchema"]["required"] == ["app"]
+    assert tools_by_name["left_click_drag"]["inputSchema"]["required"] == ["app", "start_coordinate", "coordinate"]
     assert tools_by_name["press_key"]["inputSchema"]["properties"]["key"]["type"] == "string"
+    assert tools_by_name["key"]["inputSchema"]["properties"]["repeat"]["type"] == "integer"
     assert tools_by_name["set_value"]["inputSchema"]["required"] == ["app", "element_index", "value"]
     return 0
 

@@ -8,12 +8,13 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.0"
+SERVER_VERSION = "0.3.1"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -62,12 +63,41 @@ COMPUTER_SCHEMA: dict[str, Any] = {
                 "session",
                 "wait",
                 "doctor",
+                "get_cursor_position",
+                "left_click",
+                "right_click",
+                "middle_click",
+                "double_click",
+                "triple_click",
+                "hover",
+                "left_click_drag",
             ],
             "description": "Computer use action to perform.",
         },
+        "app": {"type": "string", "description": "App/window selector for compatibility aliases that use screenshot/window-relative coordinates."},
         "target": {
             "type": "string",
             "description": "Hyprland window selector, for example address:0x1234. Optional for screenshot; required for input actions.",
+        },
+        "coordinate": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "Compatibility coordinate pair. With app, interpreted in coordinate_space; with target, treated as global logical coordinates.",
+        },
+        "start_coordinate": {
+            "type": "array",
+            "items": {"type": "number"},
+            "minItems": 2,
+            "maxItems": 2,
+            "description": "Compatibility drag start coordinate pair.",
+        },
+        "coordinate_space": {
+            "type": "string",
+            "enum": ["screenshot", "window", "global"],
+            "default": "screenshot",
+            "description": "Coordinate space for app-relative compatibility aliases. Global is only for the legacy computer tool.",
         },
         "x": {"type": "number", "description": "Global logical X coordinate."},
         "y": {"type": "number", "description": "Global logical Y coordinate."},
@@ -75,6 +105,8 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "y2": {"type": "number", "description": "Destination global logical Y coordinate for drag."},
         "dx": {"type": "number", "description": "Horizontal scroll wheel ticks."},
         "dy": {"type": "number", "description": "Vertical scroll wheel ticks."},
+        "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"], "description": "Compatibility scroll direction."},
+        "scroll_amount": {"type": "number", "description": "Compatibility scroll tick amount."},
         "button": {"type": "string", "enum": ["left", "right", "middle", "side", "extra"], "default": "left"},
         "key": {"type": "string", "description": "Key name for key actions, for example enter, escape, v, f5."},
         "keycode": {"type": "integer", "description": "Raw evdev keycode for key actions, ydotool-style."},
@@ -98,6 +130,9 @@ COMPUTER_SCHEMA: dict[str, Any] = {
             "description": "For type, choose auto, clipboard paste, or literal key events.",
             "default": "auto",
         },
+        "repeat": {"type": "integer", "description": "Number of times to repeat a key action."},
+        "source": {"type": "string", "enum": ["auto", "hyprland", "agent"], "default": "auto", "description": "Cursor source for get_cursor_position."},
+        "include_global": {"type": "boolean", "default": False, "description": "Include Hyprland global logical coordinates in get_cursor_position diagnostics."},
         "prefer_related": {
             "type": "boolean",
             "description": "For text/paste actions, prefer a same-process related popup over the root target window.",
@@ -150,6 +185,22 @@ def object_schema(properties: dict[str, Any], required: list[str] | None = None)
     return schema
 
 
+def coordinate_schema(description: str) -> dict[str, Any]:
+    return {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": description}
+
+
+def coordinate_space_property(*, include_global: bool = False) -> dict[str, Any]:
+    values = ["screenshot", "window"]
+    if include_global:
+        values.append("global")
+    return {
+        "type": "string",
+        "enum": values,
+        "default": "screenshot",
+        "description": "Coordinate space. screenshot uses get_app_state pixels; window uses logical coordinates from the target window's top-left.",
+    }
+
+
 READ_ONLY_ANNOTATIONS = {"readOnlyHint": True}
 ACTION_ANNOTATIONS = {"destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
 
@@ -157,6 +208,22 @@ ACTION_ANNOTATIONS = {"destructiveHint": False, "idempotentHint": False, "openWo
 def tool_definitions() -> list[dict[str, Any]]:
     app = string_property("App name, Hyprland class/title, pid, or address:0x... selector.")
     element_index = string_property("Element index from the last get_app_state result.")
+    coordinate = coordinate_schema("(x, y) coordinate in coordinate_space. Defaults to screenshot pixels from get_app_state.")
+    start_coordinate = coordinate_schema("(x, y) starting coordinate for a drag in coordinate_space.")
+    point_props = {
+        "app": app,
+        "element_index": element_index,
+        "coordinate": coordinate,
+        "x": number_property("X coordinate in coordinate_space."),
+        "y": number_property("Y coordinate in coordinate_space."),
+        "coordinate_space": coordinate_space_property(),
+    }
+    screenshot_props = {
+        "app": app,
+        "target": string_property("Hyprland window selector, for example address:0x1234."),
+        "show_cursor": {"type": "boolean", "default": False},
+        "cursor_source": {"type": "string", "enum": ["auto", "agent", "hyprland", "none"], "default": "none"},
+    }
     return [
         {
             "name": "computer",
@@ -177,15 +244,48 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": object_schema({"app": app}, ["app"]),
         },
         {
-            "name": "click",
-            "description": "Click an element by index or screenshot pixel coordinates.",
-            "annotations": ACTION_ANNOTATIONS,
+            "name": "read_app_state",
+            "description": "Compatibility alias for get_app_state.",
+            "annotations": READ_ONLY_ANNOTATIONS,
+            "inputSchema": object_schema({"app": app}, ["app"]),
+        },
+        {
+            "name": "screenshot",
+            "description": "Compatibility alias: capture a screenshot for an app/window, or the visible compositor if no app is passed.",
+            "annotations": READ_ONLY_ANNOTATIONS,
+            "inputSchema": object_schema(screenshot_props),
+        },
+        {
+            "name": "get_screenshot",
+            "description": "Compatibility alias for screenshot.",
+            "annotations": READ_ONLY_ANNOTATIONS,
+            "inputSchema": object_schema(screenshot_props),
+        },
+        {
+            "name": "get_cursor_position",
+            "description": "Return the current cursor position in monitor, screenshot, or window-relative coordinates.",
+            "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema(
                 {
                     "app": app,
-                    "element_index": element_index,
-                    "x": number_property("X coordinate in screenshot pixel coordinates."),
-                    "y": number_property("Y coordinate in screenshot pixel coordinates."),
+                    "source": {"type": "string", "enum": ["auto", "hyprland", "agent"], "default": "auto"},
+                    "include_global": {"type": "boolean", "default": False},
+                }
+            ),
+        },
+        {
+            "name": "list_windows",
+            "description": "Compatibility alias for list_apps.",
+            "annotations": READ_ONLY_ANNOTATIONS,
+            "inputSchema": object_schema({}),
+        },
+        {
+            "name": "click",
+            "description": "Click an element by index or screenshot/window-relative coordinates.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(
+                {
+                    **point_props,
                     "click_count": integer_property("Number of clicks. Defaults to 1."),
                     "mouse_button": {"type": "string", "enum": ["left", "right", "middle"], "default": "left"},
                 },
@@ -200,37 +300,102 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "scroll",
-            "description": "Scroll an element in a direction by pages.",
+            "description": "Scroll an element or coordinate in a direction by pages.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema(
                 {
-                    "app": app,
-                    "element_index": element_index,
+                    **point_props,
                     "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
                     "pages": number_property("Number of pages to scroll. Defaults to 1."),
                 },
-                ["app", "element_index", "direction"],
+                ["app", "direction"],
             ),
         },
         {
             "name": "drag",
-            "description": "Drag from one screenshot pixel coordinate to another.",
+            "description": "Drag from one screenshot/window-relative coordinate to another.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema(
                 {
                     "app": app,
-                    "from_x": number_property("Start X coordinate in screenshot pixel coordinates."),
-                    "from_y": number_property("Start Y coordinate in screenshot pixel coordinates."),
-                    "to_x": number_property("End X coordinate in screenshot pixel coordinates."),
-                    "to_y": number_property("End Y coordinate in screenshot pixel coordinates."),
+                    "start_coordinate": start_coordinate,
+                    "coordinate": coordinate_schema("(x, y) destination coordinate in coordinate_space."),
+                    "from_x": number_property("Start X coordinate in coordinate_space."),
+                    "from_y": number_property("Start Y coordinate in coordinate_space."),
+                    "to_x": number_property("End X coordinate in coordinate_space."),
+                    "to_y": number_property("End Y coordinate in coordinate_space."),
+                    "coordinate_space": coordinate_space_property(),
                     "duration": number_property("Drag pacing duration in seconds. Defaults to 0.2."),
                 },
-                ["app", "from_x", "from_y", "to_x", "to_y"],
+                ["app"],
+            ),
+        },
+        {
+            "name": "left_click",
+            "description": "Compatibility alias for click with the left button.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(point_props, ["app"]),
+        },
+        {
+            "name": "right_click",
+            "description": "Compatibility alias for click with the right button.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(point_props, ["app"]),
+        },
+        {
+            "name": "middle_click",
+            "description": "Compatibility alias for click with the middle button.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(point_props, ["app"]),
+        },
+        {
+            "name": "double_click",
+            "description": "Compatibility alias for a double left click.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(point_props, ["app"]),
+        },
+        {
+            "name": "triple_click",
+            "description": "Compatibility alias for a triple left click.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(point_props, ["app"]),
+        },
+        {
+            "name": "hover",
+            "description": "Compatibility alias: move the background pointer to an element or coordinate without clicking.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(point_props, ["app"]),
+        },
+        {
+            "name": "move_mouse",
+            "description": "Compatibility alias for hover.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(point_props, ["app"]),
+        },
+        {
+            "name": "left_click_drag",
+            "description": "Compatibility alias for drag using start_coordinate and coordinate.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "start_coordinate": start_coordinate,
+                    "coordinate": coordinate,
+                    "coordinate_space": coordinate_space_property(),
+                    "duration": number_property("Drag pacing duration in seconds. Defaults to 0.2."),
+                },
+                ["app", "start_coordinate", "coordinate"],
             ),
         },
         {
             "name": "type_text",
             "description": "Type literal text into the target app, preferring AT-SPI editable text then background input fallback.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema({"app": app, "text": string_property("Literal text to type.")}, ["app", "text"]),
+        },
+        {
+            "name": "type",
+            "description": "Compatibility alias for type_text.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema({"app": app, "text": string_property("Literal text to type.")}, ["app", "text"]),
         },
@@ -241,10 +406,30 @@ def tool_definitions() -> list[dict[str, Any]]:
             "inputSchema": object_schema({"app": app, "key": string_property("Key or key-combination to press.")}, ["app", "key"]),
         },
         {
+            "name": "key",
+            "description": "Compatibility alias for press_key. Accepts key or text.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "key": string_property("Key or key-combination to press."),
+                    "text": string_property("Compatibility key text."),
+                    "repeat": integer_property("Number of times to repeat the key. Defaults to 1."),
+                },
+                ["app"],
+            ),
+        },
+        {
             "name": "set_value",
             "description": "Set the value of a settable accessibility element.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema({"app": app, "element_index": element_index, "value": string_property("Value to assign.")}, ["app", "element_index", "value"]),
+        },
+        {
+            "name": "wait",
+            "description": "Compatibility alias: wait for a short duration.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema({"duration": number_property("Seconds to wait. Defaults to 1.")}),
         },
     ]
 
@@ -336,6 +521,9 @@ def require_target(args: dict[str, Any]) -> str:
 
 
 def require_xy(args: dict[str, Any]) -> tuple[float, float]:
+    pair = coordinate_pair(args.get("coordinate"))
+    if pair is not None:
+        return pair
     x = args.get("x")
     y = args.get("y")
     if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
@@ -472,7 +660,7 @@ def remember_snapshot(query: str, snapshot: dict[str, Any]) -> None:
 def current_snapshot(app: str) -> dict[str, Any]:
     snapshot = SNAPSHOTS.get(normalize(app))
     if snapshot is None:
-        raise RuntimeError(f"No app state is available for {app}. Run get_app_state before action tools.")
+        snapshot = build_app_snapshot(app)
     return snapshot
 
 
@@ -496,6 +684,74 @@ def screenshot_point_to_global(snapshot: dict[str, Any], x: float, y: float) -> 
     return float(bounds.get("x") or 0.0) + float(x) / scale, float(bounds.get("y") or 0.0) + float(y) / scale
 
 
+def window_point_to_global(snapshot: dict[str, Any], x: float, y: float) -> tuple[float, float]:
+    screenshot = snapshot.get("screenshot") or {}
+    bounds = screenshot.get("logicalBounds") or {}
+    return float(bounds.get("x") or 0.0) + float(x), float(bounds.get("y") or 0.0) + float(y)
+
+
+def point_to_global(snapshot: dict[str, Any], x: float, y: float, coordinate_space: Any = "screenshot") -> tuple[float, float]:
+    space = normalize(coordinate_space or "screenshot").replace("_", "-")
+    if space in {"screenshot", "screenshot-pixel", "screenshot-pixels", "image", "pixel", "pixels"}:
+        return screenshot_point_to_global(snapshot, x, y)
+    if space in {"window", "window-relative", "window-logical", "logical"}:
+        return window_point_to_global(snapshot, x, y)
+    if space == "global":
+        return x, y
+    raise RuntimeError(f"unsupported coordinate_space: {coordinate_space}")
+
+
+def coordinate_pair(value: Any) -> tuple[float, float] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 2:
+        return None
+    x, y = value[0], value[1]
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return float(x), float(y)
+
+
+def point_from_args(args: dict[str, Any], *, prefix: str = "", coordinate_key: str = "coordinate") -> tuple[float, float] | None:
+    pair = coordinate_pair(args.get(coordinate_key))
+    if pair is not None:
+        return pair
+
+    if prefix:
+        x_key = f"{prefix}_x"
+        y_key = f"{prefix}_y"
+    else:
+        x_key = "x"
+        y_key = "y"
+    x = args.get(x_key)
+    y = args.get(y_key)
+    if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+        return float(x), float(y)
+    return None
+
+
+def snapshot_position(snapshot: dict[str, Any], global_x: float, global_y: float) -> dict[str, Any]:
+    screenshot = snapshot.get("screenshot") or {}
+    bounds = screenshot.get("logicalBounds") or {}
+    scale = float(screenshot.get("scale") or 1.0)
+    if scale <= 0:
+        scale = 1.0
+    left = float(bounds.get("x") or 0.0)
+    top = float(bounds.get("y") or 0.0)
+    width = float(bounds.get("width") or 0.0)
+    height = float(bounds.get("height") or 0.0)
+    window_x = global_x - left
+    window_y = global_y - top
+    screenshot_x = window_x * scale
+    screenshot_y = window_y * scale
+    screenshot_width = float(screenshot.get("width") or width * scale)
+    screenshot_height = float(screenshot.get("height") or height * scale)
+    return {
+        "window": {"x": window_x, "y": window_y, "coordinateSpace": "window"},
+        "screenshot": {"x": screenshot_x, "y": screenshot_y, "coordinateSpace": "screenshot"},
+        "insideWindow": 0 <= window_x <= width and 0 <= window_y <= height,
+        "insideScreenshot": 0 <= screenshot_x <= screenshot_width and 0 <= screenshot_y <= screenshot_height,
+    }
+
+
 def element_center(element: dict[str, Any]) -> tuple[float, float]:
     frame = element.get("frame")
     if not isinstance(frame, dict):
@@ -503,10 +759,86 @@ def element_center(element: dict[str, Any]) -> tuple[float, float]:
     return float(frame.get("x") or 0.0) + float(frame.get("width") or 0.0) / 2.0, float(frame.get("y") or 0.0) + float(frame.get("height") or 0.0) / 2.0
 
 
+def action_point(snapshot: dict[str, Any], args: dict[str, Any], *, default_center: bool = False) -> tuple[float, float]:
+    element_index = args.get("element_index")
+    if isinstance(element_index, str) and element_index:
+        return element_center(lookup_element(snapshot, element_index))
+
+    point = point_from_args(args)
+    if point is not None:
+        return point
+
+    if default_center:
+        screenshot = snapshot.get("screenshot") or {}
+        return float(screenshot.get("width") or 0.0) / 2.0, float(screenshot.get("height") or 0.0) / 2.0
+
+    raise RuntimeError("action requires element_index, coordinate, or x/y")
+
+
+def cursor_state_path() -> pathlib.Path:
+    return pathlib.Path(tempfile.gettempdir()) / f"hypr-agent-protal-{os.getuid()}" / "cursor.json"
+
+
 def screenshot_for_window(window: dict[str, Any]) -> tuple[dict[str, Any], str]:
     info = call_ctl(["screenshot", "--target", window_selector(window), "--base64", "--no-cursor"])
     data = info.pop("pngBase64")
     return info, data
+
+
+def hyprctl_json(*args: str) -> Any:
+    proc = subprocess.run(["hyprctl", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if proc.returncode != 0:
+        raise RuntimeError((proc.stderr or proc.stdout or f"hyprctl {' '.join(args)} failed").strip())
+    return json.loads(proc.stdout or "null")
+
+
+def hyprland_cursor_position() -> dict[str, float]:
+    data = hyprctl_json("cursorpos", "-j")
+    return {"x": float(data.get("x") or 0.0), "y": float(data.get("y") or 0.0)}
+
+
+def agent_cursor_position() -> dict[str, Any] | None:
+    try:
+        data = json.loads(cursor_state_path().read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    x = data.get("x")
+    y = data.get("y")
+    if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+        return None
+    return {
+        "x": float(x),
+        "y": float(y),
+        "target": str(data.get("target") or ""),
+        "action": str(data.get("action") or ""),
+        "button": str(data.get("button") or ""),
+        "timestamp": float(data.get("timestamp") or 0.0),
+    }
+
+
+def monitor_position(global_x: float, global_y: float) -> dict[str, Any] | None:
+    monitors = hyprctl_json("monitors", "-j")
+    if not isinstance(monitors, list):
+        return None
+    for monitor in monitors:
+        if not isinstance(monitor, dict):
+            continue
+        x = float(monitor.get("x") or 0.0)
+        y = float(monitor.get("y") or 0.0)
+        width = float(monitor.get("width") or 0.0)
+        height = float(monitor.get("height") or 0.0)
+        if x <= global_x < x + width and y <= global_y < y + height:
+            return {
+                "name": monitor.get("name"),
+                "id": monitor.get("id"),
+                "x": global_x - x,
+                "y": global_y - y,
+                "width": width,
+                "height": height,
+                "scale": monitor.get("scale"),
+                "coordinateSpace": "monitor",
+            }
+    return None
 
 
 def atspi_init_error() -> str | None:
@@ -1300,13 +1632,78 @@ def tool_get_app_state(args: dict[str, Any]) -> dict[str, Any]:
     return mcp_snapshot_result(build_app_snapshot(app))
 
 
+def tool_screenshot(args: dict[str, Any]) -> dict[str, Any]:
+    cmd = ["screenshot", "--base64"]
+    app = args.get("app")
+    target = args.get("target")
+    if isinstance(app, str) and app:
+        target = window_selector(resolve_hypr_window(app))
+    if isinstance(target, str) and target:
+        cmd.extend(["--target", target])
+    if args.get("show_cursor") is False:
+        cmd.append("--no-cursor")
+    cursor_source = args.get("cursor_source")
+    if isinstance(cursor_source, str) and cursor_source:
+        cmd.extend(["--cursor-source", cursor_source])
+    info = call_ctl(cmd)
+    data = info.pop("pngBase64")
+    return {
+        "content": [
+            {"type": "text", "text": json.dumps(info, ensure_ascii=False)},
+            {"type": "image", "mimeType": "image/png", "data": data},
+        ],
+        "structuredContent": info,
+        "isError": False,
+    }
+
+
+def tool_get_cursor_position(args: dict[str, Any]) -> dict[str, Any]:
+    source = str(args.get("source") or "auto").lower()
+    if source not in {"auto", "hyprland", "agent"}:
+        raise RuntimeError("source must be auto, hyprland, or agent")
+
+    hypr = hyprland_cursor_position()
+    agent = agent_cursor_position()
+    selected = hypr
+    selected_source = "hyprland"
+    if source == "agent" or (source == "auto" and agent is not None):
+        if agent is None:
+            raise RuntimeError("no agent cursor position is recorded yet")
+        selected = {"x": agent["x"], "y": agent["y"]}
+        selected_source = "agent"
+
+    global_x = float(selected["x"])
+    global_y = float(selected["y"])
+    result: dict[str, Any] = {
+        "source": selected_source,
+        "monitor": monitor_position(global_x, global_y),
+        "agentCursor": agent,
+    }
+
+    app = args.get("app")
+    if isinstance(app, str) and app:
+        snapshot = SNAPSHOTS.get(normalize(app)) or build_app_snapshot(app)
+        result["app"] = {
+            "name": (snapshot.get("app") or {}).get("name"),
+            "target": snapshot.get("target"),
+            "windowTitle": snapshot.get("windowTitle"),
+        }
+        result["position"] = snapshot_position(snapshot, global_x, global_y)
+    else:
+        result["position"] = result["monitor"]
+
+    if args.get("include_global"):
+        result["global"] = {"x": global_x, "y": global_y, "coordinateSpace": "global"}
+
+    return mcp_text(json.dumps(result, ensure_ascii=False), structured=result)
+
+
 def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
     snapshot = current_snapshot(app)
     target = str(snapshot["target"])
     button = str(args.get("mouse_button") or "left")
     click_count = int(args.get("click_count") or 1)
-    element: dict[str, Any] | None = None
 
     element_index = args.get("element_index")
     if isinstance(element_index, str) and element_index:
@@ -1317,13 +1714,13 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
                 refreshed = build_app_snapshot(app)
                 return mcp_snapshot_result(refreshed)
         x, y = element_center(element)
+        coordinate_space = "screenshot"
     else:
-        x = args.get("x")
-        y = args.get("y")
-        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
-            raise RuntimeError("click requires either element_index or x/y")
+        point = action_point(snapshot, args)
+        x, y = point
+        coordinate_space = args.get("coordinate_space") or "screenshot"
 
-    global_x, global_y = screenshot_point_to_global(snapshot, float(x), float(y))
+    global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
     action = "doubleclick" if click_count > 1 and button == "left" else "click"
     for index in range(max(1, click_count)):
         if action == "doubleclick":
@@ -1351,13 +1748,18 @@ def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
 def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
     snapshot = current_snapshot(app)
-    element = lookup_element(snapshot, str(args.get("element_index") or ""))
     direction = str(args.get("direction") or "down").lower()
     pages = float(args.get("pages") or 1.0)
     if pages <= 0:
         raise RuntimeError("pages must be > 0")
-    x, y = element_center(element)
-    global_x, global_y = screenshot_point_to_global(snapshot, x, y)
+    element_index = args.get("element_index")
+    if isinstance(element_index, str) and element_index:
+        x, y = element_center(lookup_element(snapshot, element_index))
+        coordinate_space = "screenshot"
+    else:
+        x, y = action_point(snapshot, args, default_center=True)
+        coordinate_space = args.get("coordinate_space") or "screenshot"
+    global_x, global_y = point_to_global(snapshot, x, y, coordinate_space)
     ticks = max(1.0, pages * 5.0)
     dx = 0.0
     dy = 0.0
@@ -1378,14 +1780,24 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
 def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
     snapshot = current_snapshot(app)
-    required = ["from_x", "from_y", "to_x", "to_y"]
-    for key in required:
-        if not isinstance(args.get(key), (int, float)):
-            raise RuntimeError(f"Missing required argument: {key}")
-    from_x, from_y = screenshot_point_to_global(snapshot, float(args["from_x"]), float(args["from_y"]))
-    to_x, to_y = screenshot_point_to_global(snapshot, float(args["to_x"]), float(args["to_y"]))
+    start = point_from_args(args, prefix="from", coordinate_key="start_coordinate")
+    end = point_from_args(args, prefix="to", coordinate_key="coordinate")
+    if start is None or end is None:
+        raise RuntimeError("drag requires start_coordinate/coordinate or from_x/from_y/to_x/to_y")
+    coordinate_space = args.get("coordinate_space") or "screenshot"
+    from_x, from_y = point_to_global(snapshot, start[0], start[1], coordinate_space)
+    to_x, to_y = point_to_global(snapshot, end[0], end[1], coordinate_space)
     duration = float(args.get("duration") or 0.2)
     call_ctl(["pointer", "--json", str(snapshot["target"]), str(from_x), str(from_y), "drag", "left", str(to_x), str(to_y), "--duration", str(max(0.0, min(duration, 3.0)))])
+    return mcp_snapshot_result(build_app_snapshot(app))
+
+
+def semantic_hover(args: dict[str, Any]) -> dict[str, Any]:
+    app = str(args.get("app") or "")
+    snapshot = current_snapshot(app)
+    x, y = action_point(snapshot, args)
+    global_x, global_y = point_to_global(snapshot, x, y, args.get("coordinate_space") or "screenshot")
+    call_ctl(["pointer", "--json", str(snapshot["target"]), str(global_x), str(global_y), "move", "left"])
     return mcp_snapshot_result(build_app_snapshot(app))
 
 
@@ -1403,14 +1815,18 @@ def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
 
 def semantic_press_key(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
-    key = args.get("key")
+    key = args.get("key") or args.get("text")
     if not isinstance(key, str) or not key:
         raise RuntimeError("Missing required argument: key")
     snapshot = current_snapshot(app)
     parts = [part for part in key.replace("-", "+").split("+") if part]
     if not parts:
         raise RuntimeError("Missing required argument: key")
-    keyboard(str(snapshot["target"]), parts[-1], "+".join(parts[:-1]))
+    repeat = args.get("repeat", 1)
+    if not isinstance(repeat, int) or repeat < 1:
+        repeat = 1
+    for _ in range(min(repeat, 100)):
+        keyboard(str(snapshot["target"]), parts[-1], "+".join(parts[:-1]))
     return mcp_snapshot_result(build_app_snapshot(app))
 
 
@@ -1424,6 +1840,24 @@ def semantic_set_value(args: dict[str, Any]) -> dict[str, Any]:
     if not atspi_set_element_value(snapshot, element, value):
         raise RuntimeError("Cannot set a value for an element that is not settable")
     return mcp_snapshot_result(build_app_snapshot(app))
+
+
+def semantic_wait(args: dict[str, Any]) -> dict[str, Any]:
+    duration = args.get("duration", 1)
+    if not isinstance(duration, (int, float)):
+        raise RuntimeError("wait requires numeric duration")
+    time.sleep(max(0.0, min(float(duration), 30.0)))
+    return result_text({"ok": True, "duration": duration})
+
+
+def alias_click(button: str, click_count: int) -> Any:
+    def call(args: dict[str, Any]) -> dict[str, Any]:
+        next_args = dict(args)
+        next_args["mouse_button"] = button
+        next_args["click_count"] = click_count
+        return semantic_click(next_args)
+
+    return call
 
 
 def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
@@ -1467,22 +1901,108 @@ def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
 
 SEMANTIC_TOOLS = {
     "list_apps": tool_list_apps,
+    "list_windows": tool_list_apps,
     "get_app_state": tool_get_app_state,
+    "read_app_state": tool_get_app_state,
+    "screenshot": tool_screenshot,
+    "get_screenshot": tool_screenshot,
+    "get_cursor_position": tool_get_cursor_position,
     "click": semantic_click,
+    "left_click": alias_click("left", 1),
+    "right_click": alias_click("right", 1),
+    "middle_click": alias_click("middle", 1),
+    "double_click": alias_click("left", 2),
+    "triple_click": alias_click("left", 3),
     "perform_secondary_action": semantic_perform_secondary_action,
     "scroll": semantic_scroll,
     "drag": semantic_drag,
+    "left_click_drag": semantic_drag,
+    "hover": semantic_hover,
+    "move_mouse": semantic_hover,
     "type_text": semantic_type_text,
+    "type": semantic_type_text,
     "press_key": semantic_press_key,
+    "key": semantic_press_key,
     "set_value": semantic_set_value,
+    "wait": semantic_wait,
 }
 
 
 def computer(args: dict[str, Any]) -> dict[str, Any]:
-    action = args.get("action")
+    action = str(args.get("action") or "")
+
+    app = args.get("app")
+    if isinstance(app, str) and app:
+        if action == "get_cursor_position":
+            return tool_get_cursor_position(args)
+        if action == "left_click":
+            return alias_click("left", 1)(args)
+        if action == "right_click":
+            return alias_click("right", 1)(args)
+        if action == "middle_click":
+            return alias_click("middle", 1)(args)
+        if action == "double_click":
+            return alias_click("left", 2)(args)
+        if action == "triple_click":
+            return alias_click("left", 3)(args)
+        if action == "hover":
+            return semantic_hover(args)
+        if action == "left_click_drag":
+            return semantic_drag(args)
+        if action == "click":
+            return semantic_click(args)
+        if action == "doubleclick":
+            next_args = dict(args)
+            next_args["click_count"] = 2
+            return semantic_click(next_args)
+        if action == "move":
+            return semantic_hover(args)
+        if action == "scroll":
+            next_args = dict(args)
+            if "direction" not in next_args and isinstance(args.get("scroll_direction"), str):
+                next_args["direction"] = args.get("scroll_direction")
+            if "pages" not in next_args and isinstance(args.get("scroll_amount"), (int, float)):
+                next_args["pages"] = max(1.0, float(args["scroll_amount"]) / 5.0)
+            return semantic_scroll(next_args)
+        if action == "drag":
+            return semantic_drag(args)
+        if action == "type":
+            return semantic_type_text(args)
+        if action == "key":
+            return semantic_press_key(args)
+
+    if action == "get_cursor_position":
+        return tool_get_cursor_position(args)
+    if action in {"left_click", "right_click", "middle_click", "double_click", "triple_click", "hover"}:
+        mapped = dict(args)
+        mapped["action"] = "move" if action == "hover" else ("doubleclick" if action in {"double_click", "triple_click"} else "click")
+        mapped["button"] = {
+            "left_click": "left",
+            "right_click": "right",
+            "middle_click": "middle",
+            "double_click": "left",
+            "triple_click": "left",
+            "hover": "left",
+        }[action]
+        args = mapped
+        action = str(args["action"])
+
+    if action == "left_click_drag":
+        start = coordinate_pair(args.get("start_coordinate"))
+        end = coordinate_pair(args.get("coordinate"))
+        if start is None or end is None:
+            raise RuntimeError("left_click_drag requires start_coordinate and coordinate")
+        mapped = dict(args)
+        mapped.update({"action": "drag", "x": start[0], "y": start[1], "x2": end[0], "y2": end[1], "button": "left"})
+        args = mapped
+        action = "drag"
+
     if action == "screenshot":
         cmd = ["screenshot", "--base64"]
         target = args.get("target")
+        app = args.get("app")
+        if (not isinstance(target, str) or not target) and isinstance(app, str) and app:
+            target = window_selector(resolve_hypr_window(app))
         if isinstance(target, str) and target:
             cmd.extend(["--target", target])
         show_cursor = args.get("show_cursor")
@@ -1534,8 +2054,20 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
     if action == "scroll":
         target = require_target(args)
         x, y = require_xy(args)
-        dy = args.get("dy", 1)
+        amount = args.get("scroll_amount", 1)
+        if not isinstance(amount, (int, float)):
+            amount = 1
+        direction = str(args.get("scroll_direction") or "").lower()
+        dy = args.get("dy", amount)
         dx = args.get("dx", 0)
+        if direction == "up":
+            dy, dx = abs(float(amount)), 0
+        elif direction == "down":
+            dy, dx = -abs(float(amount)), 0
+        elif direction == "left":
+            dx, dy = abs(float(amount)), 0
+        elif direction == "right":
+            dx, dy = -abs(float(amount)), 0
         if not isinstance(dx, (int, float)) or not isinstance(dy, (int, float)):
             raise RuntimeError("scroll requires numeric dx/dy")
         info = call_ctl(["pointer", "--json", target, str(x), str(y), "scroll", str(dy), "--dx", str(dx)])
@@ -1559,7 +2091,12 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
         key, modifiers = key_from_args(args)
         x = args.get("x")
         y = args.get("y")
-        info = keyboard(target, key, modifiers, float(x) if isinstance(x, (int, float)) else None, float(y) if isinstance(y, (int, float)) else None)
+        repeat = args.get("repeat", 1)
+        if not isinstance(repeat, int) or repeat < 1:
+            repeat = 1
+        info = {}
+        for _ in range(min(repeat, 100)):
+            info = keyboard(target, key, modifiers, float(x) if isinstance(x, (int, float)) else None, float(y) if isinstance(y, (int, float)) else None)
         return result_text(info)
 
     if action == "type":

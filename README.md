@@ -48,9 +48,11 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 
 - `list_apps`: lists running Hyprland windows with stable selectors, classes, titles, pid, workspace, geometry, and XWayland status.
 - `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback.
-- `click`, `scroll`, `drag`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot pixel coordinates plus the native background input dispatchers.
+- `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
+- `click`, `scroll`, `drag`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers.
+- Compatibility aliases: `read_app_state`, `list_windows`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
 
-The app-state coordinate contract matches the screenshot returned by `get_app_state`: `x`, `y`, `from_x`, `from_y`, `to_x`, and `to_y` are screenshot pixels, not Hyprland global logical coordinates. The MCP bridge converts them back to the target window's global logical coordinates before dispatch.
+The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch.
 
 ### AT-SPI App State
 
@@ -91,6 +93,7 @@ The compatibility `computer` tool still exposes these lower-level actions:
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
 - `doctor`: reports AT-SPI/session diagnostics and target accessibility environment hints.
+- Compatibility action aliases inside `computer`: `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `left_click_drag`, and `get_cursor_position`.
 
 The command-line bridge is also usable directly:
 

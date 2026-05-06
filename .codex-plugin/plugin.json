@@ -1,6 +1,6 @@
 {
   "name": "hypr-agent-protal",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Hyprland background screenshot, input, clipboard, and app-state MCP bridge",
   "mcpServers": "./.mcp.json",
   "interface": {
