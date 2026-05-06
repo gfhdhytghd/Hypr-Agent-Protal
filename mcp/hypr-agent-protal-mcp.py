@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.19"
+SERVER_VERSION = "0.3.20"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -967,21 +967,25 @@ def window_matches_launch(window: dict[str, Any], query: str) -> bool:
     return any(normalized == field or desktop == field or normalized in field or desktop in field for field in fields if field)
 
 
-def wait_for_launch_window(before_ids: set[str], query: str, timeout: float) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+def wait_for_launch_window(before_ids: set[str], query: str, timeout: float, *, allow_existing_fallback: bool = True) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     deadline = time.monotonic() + max(0.0, timeout)
     latest: list[dict[str, Any]] = []
+    last_new_windows: list[dict[str, Any]] = []
     while True:
         latest = list_hypr_windows()
         new_windows = [window for window in latest if not (window_identities([window]) & before_ids)]
+        if new_windows:
+            last_new_windows = new_windows
         matching_new = [window for window in new_windows if window_matches_launch(window, query)]
         if matching_new:
             return matching_new[0], matching_new
-        if new_windows:
-            return new_windows[0], new_windows
-        matching_existing = [window for window in latest if window_matches_launch(window, query)]
-        if matching_existing:
-            return matching_existing[0], []
+        if allow_existing_fallback:
+            matching_existing = [window for window in latest if window_matches_launch(window, query)]
+            if matching_existing:
+                return matching_existing[0], []
         if time.monotonic() >= deadline:
+            if last_new_windows:
+                return last_new_windows[0], last_new_windows
             return None, []
         time.sleep(0.2)
 
@@ -2649,7 +2653,7 @@ def tool_launch_app(args: dict[str, Any]) -> dict[str, Any]:
     before_ids = window_identities(before)
     command = launch_command_string(parts)
     output = hyprctl_exec(command)
-    window, new_windows = wait_for_launch_window(before_ids, match_query, timeout)
+    window, new_windows = wait_for_launch_window(before_ids, match_query, timeout, allow_existing_fallback=reuse_existing)
     result: dict[str, Any] = {
         "ok": True,
         "reused": False,

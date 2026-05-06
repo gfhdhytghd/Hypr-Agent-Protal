@@ -146,6 +146,25 @@ def main() -> int:
     assert mcp.text_is_bulk_paste_candidate("A\tB\n1\t2") is True
     assert mcp.text_is_bulk_paste_candidate("short") is False
     assert mcp.snapshot_has_grid_target({"elements": [{"controlType": "table cell"}]}) is True
+
+    original_list_hypr_windows = mcp.list_hypr_windows
+    try:
+        existing_window = {"address": "0xold", "class": "chromium", "title": "Old Chromium"}
+        mcp.list_hypr_windows = lambda: [existing_window]
+        reused, reused_new = mcp.wait_for_launch_window({"address:0xold"}, "chromium", 0.0, allow_existing_fallback=True)
+        assert reused is existing_window
+        assert reused_new == []
+        strict, strict_new = mcp.wait_for_launch_window({"address:0xold"}, "chromium", 0.0, allow_existing_fallback=False)
+        assert strict is None
+        assert strict_new == []
+
+        unrelated_new = {"address": "0xnew", "class": "splash", "title": "Starting"}
+        mcp.list_hypr_windows = lambda: [existing_window, unrelated_new]
+        selected, selected_new = mcp.wait_for_launch_window({"address:0xold"}, "chromium", 0.0, allow_existing_fallback=False)
+        assert selected is unrelated_new
+        assert selected_new == [unrelated_new]
+    finally:
+        mcp.list_hypr_windows = original_list_hypr_windows
     return 0
 
 
