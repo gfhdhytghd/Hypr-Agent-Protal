@@ -409,6 +409,11 @@ bool pointInsideBox(const Vector2D& point, const CBox& box, double padding = 0.0
     return point.x >= box.x + padding && point.y >= box.y + padding && point.x <= box.x + box.w - padding && point.y <= box.y + box.h - padding;
 }
 
+bool indicatorActionShouldSnap(std::string_view action) {
+    return action == "click" || action == "doubleclick" || action == "double-click" || action == "press" || action == "down" || action == "release" ||
+        action == "up" || action == "scroll" || action == "key" || action == "type" || action == "set_value";
+}
+
 Vector2D cubicPoint(const Vector2D& start, const Vector2D& control1, const Vector2D& control2, const Vector2D& end, double progress) {
     const double t = std::clamp(progress, 0.0, 1.0);
     const double omt = 1.0 - t;
@@ -633,7 +638,7 @@ void showAgentIndicator(const PHLWINDOW& targetWindow, const Vector2D& globalPos
     const auto now = Time::steadyNow();
     Vector2D   motionStart = globalPos;
 
-    if (oldWindow && oldWindow == targetWindow) {
+    if (!indicatorActionShouldSnap(action) && oldWindow && oldWindow == targetWindow) {
         if (previousDisplay && pointInsideBox(*previousDisplay, targetWindow->getFullWindowBoundingBox()))
             motionStart = *previousDisplay;
         else if (previousTarget && pointInsideBox(*previousTarget, targetWindow->getFullWindowBoundingBox()))
@@ -1340,8 +1345,8 @@ SDispatchResult dispatchPointer(const std::string& args) {
         const auto dx = parts.size() >= 6 ? parseDouble(parts[5]) : std::optional<double>{0.0};
         if (!dx || !dy)
             return {.success = false, .error = "scroll dx/dy must be finite numbers"};
-        sendPointerScroll(*dx, *dy);
         showAgentIndicator(target->window, Vector2D{*x, *y}, action);
+        sendPointerScroll(*dx, *dy);
         restore.restoreLater(std::chrono::milliseconds(90), false);
         return {.success = true};
     }
@@ -1450,19 +1455,19 @@ SDispatchResult dispatchPointer(const std::string& args) {
     }
 
     if (action == "click") {
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
 
     if (action == "doubleclick" || action == "double-click") {
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
 
         if (!g_pEventLoopManager) {
             restore.restoreForTarget(*target);
@@ -1518,17 +1523,17 @@ SDispatchResult dispatchPointer(const std::string& args) {
     }
 
     if (action == "press" || action == "down") {
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
 
     if (action == "release" || action == "up") {
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -1763,7 +1768,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.12",
+        .version = "0.3.13",
     };
 }
 
