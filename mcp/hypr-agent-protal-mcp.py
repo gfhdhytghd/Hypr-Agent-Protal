@@ -2425,6 +2425,11 @@ def element_has_primary_atspi_action(element: dict[str, Any]) -> bool:
     return False
 
 
+def element_is_menu_item(element: dict[str, Any]) -> bool:
+    role = normalize(element.get("controlType") or element.get("localizedControlType") or "")
+    return "menu item" in role or role in {"menuitem", "check menu item", "radio menu item"}
+
+
 def element_click_mode(args: dict[str, Any]) -> str:
     raw = args.get("element_click_mode")
     if raw is None:
@@ -3215,6 +3220,8 @@ def merge_last_action(after: dict[str, Any], before: dict[str, Any], action_resu
 
 
 def snapshot_after_action(app: str, before: dict[str, Any], action_result: dict[str, Any] | None = None) -> dict[str, Any]:
+    if action_result:
+        time.sleep(0.35)
     try:
         after = build_app_snapshot(app)
     except Exception as exc:
@@ -3549,6 +3556,8 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
 
     if element is not None and button == "left" and click_count == 1:
         mode = element_click_mode(args)
+        if mode == "pointer" and element_is_menu_item(element) and element_has_primary_atspi_action(element):
+            mode = "atspi"
         if mode in {"auto", "atspi"}:
             if not element_has_primary_atspi_action(element):
                 if mode == "atspi":
