@@ -145,7 +145,10 @@ def screenshot(args: argparse.Namespace) -> int:
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     session_path = root / f"session-{time.time_ns()}.json"
 
-    result = dispatch(args.dispatcher, str(session_path))
+    payload = str(session_path)
+    if args.target:
+        payload = ",".join([payload, args.target])
+    result = dispatch(args.dispatcher, payload)
     if result.returncode != 0:
         print(result.stderr or result.stdout, file=sys.stderr, end="")
         return result.returncode or 1
@@ -226,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     shot = sub.add_parser("screenshot", help="capture a compositor screenshot session")
     shot.add_argument("--dispatcher", default="HyprCUM:screenshot")
     shot.add_argument("--output-dir")
+    shot.add_argument("--target", help="optional Hyprland window selector for unoccluded target-window capture")
     shot.add_argument("--base64", action="store_true")
     shot.set_defaults(func=screenshot)
 

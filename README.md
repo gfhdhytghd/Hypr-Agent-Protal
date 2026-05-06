@@ -6,11 +6,12 @@ It exposes three compositor dispatchers:
 
 ```ini
 hyprctl dispatch HyprCUM:screenshot /tmp/hyprcum-session.json
+hyprctl dispatch HyprCUM:screenshot '/tmp/hyprcum-session.json,address:0x1234'
 hyprctl dispatch HyprCUM:pointer 'address:0x1234,930,520,click,left'
 hyprctl dispatch HyprCUM:keyboard 'address:0x1234,tap,v,ctrl'
 ```
 
-The screenshot dispatcher renders active monitor workspaces into RGBA artifacts from inside Hyprland, then writes a JSON session file. The pointer dispatcher resolves the target with `g_pCompositor->getWindowByRegex()`, focuses the target surface only for the injected pointer events, sends motion/button/frame events through `g_pSeatManager`, then restores the previous pointer focus.
+The screenshot dispatcher renders active monitor workspaces into RGBA artifacts from inside Hyprland, then writes a JSON session file. When a window selector is supplied, it renders that window directly into an offscreen framebuffer, so the artifact is not occluded by other windows. The pointer dispatcher resolves the target with `g_pCompositor->getWindowByRegex()`, focuses the target surface only for the injected pointer events, sends motion/button/frame events through `g_pSeatManager`, then restores the previous pointer focus.
 
 For XWayland windows, the dispatcher sends to the main `wlSurface()` resource and scales surface-local coordinates by `m_X11SurfaceScaledBy`. For native Wayland windows, it uses `vectorWindowToSurface(globalPos, window, localPos)` so subsurfaces receive local coordinates.
 
@@ -41,7 +42,7 @@ python3 mcp/hyprcum_mcp.py
 
 The MCP server exposes one tool named `computer` with these actions:
 
-- `screenshot`: captures a compositor screenshot and returns PNG image content plus monitor/window metadata.
+- `screenshot`: captures compositor screenshots and returns PNG image content plus metadata. Pass `target` for unoccluded target-window capture.
 - `windows`: lists Hyprland clients with addresses, classes, titles, geometry, and workspace data.
 - `move`, `click`, `doubleclick`, `press`, `release`: sends pointer input to a target window selector such as `address:0x1234`.
 - `scroll`: sends wheel axis events to a target window.
@@ -55,6 +56,7 @@ The command-line bridge is also usable directly:
 
 ```sh
 scripts/hyprcumctl screenshot --base64
+scripts/hyprcumctl screenshot --target 'address:0x1234' --base64
 scripts/hyprcumctl windows
 scripts/hyprcumctl pointer 'address:0x1234' 930 520 click left
 scripts/hyprcumctl pointer 'address:0x1234' 930 520 scroll -3

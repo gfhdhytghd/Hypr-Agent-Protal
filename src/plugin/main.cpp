@@ -560,11 +560,13 @@ SDispatchResult dispatchScreenshot(const std::string& args) {
     if (!configBool("allow_screenshot", true))
         return {.success = false, .error = "HyprCUM screenshot dispatch is disabled"};
 
-    const auto path = trim(args);
+    const auto parts = splitCsv(args);
+    const auto path = parts.empty() ? std::string{} : trim(parts[0]);
     if (path.empty())
-        return {.success = false, .error = "usage: HyprCUM:screenshot <output-session-json-path>"};
+        return {.success = false, .error = "usage: HyprCUM:screenshot <output-session-json-path>[,<window-regex>]"};
 
-    const auto result = hyprcum::captureScreenshotSession(std::filesystem::path(path));
+    const auto target = parts.size() >= 2 ? trim(parts[1]) : std::string{};
+    const auto result = hyprcum::captureScreenshotSession(std::filesystem::path(path), target);
     if (!result.success)
         return {.success = false, .error = result.error};
     return {.success = true};
@@ -595,7 +597,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "Hypr-ComputerUse-MCP",
         .description = "Background screenshot, pointer, and keyboard primitives for Hyprland Computer Use",
         .author = "wilf",
-        .version = "0.2.0",
+        .version = "0.2.1",
     };
 }
 

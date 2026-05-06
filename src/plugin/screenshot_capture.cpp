@@ -5,6 +5,7 @@
 #define private public
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
@@ -57,8 +58,17 @@ struct RgbaReadbackRegion {
 
 struct RgbaReadback {
     std::vector<unsigned char> pixels;
+    int                        cropX = 0;
+    int                        cropTopY = 0;
     int                        width = 0;
     int                        height = 0;
+};
+
+struct PixelBounds {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
 };
 
 std::string pointerId(const void* ptr) {
@@ -79,6 +89,24 @@ int positiveRoundedIntFromDouble(double value) {
     if (value >= static_cast<double>(std::numeric_limits<int>::max()))
         return std::numeric_limits<int>::max();
     return std::max(1, static_cast<int>(std::lround(value)));
+}
+
+int positiveIntFromDouble(double value) {
+    if (!std::isfinite(value) || value <= 0.0)
+        return 1;
+    if (value >= static_cast<double>(std::numeric_limits<int>::max()))
+        return std::numeric_limits<int>::max();
+    return std::max(1, static_cast<int>(value));
+}
+
+int clampedIntFromDouble(double value) {
+    if (!std::isfinite(value))
+        return value < 0.0 ? std::numeric_limits<int>::min() : std::numeric_limits<int>::max();
+    if (value <= static_cast<double>(std::numeric_limits<int>::min()))
+        return std::numeric_limits<int>::min();
+    if (value >= static_cast<double>(std::numeric_limits<int>::max()))
+        return std::numeric_limits<int>::max();
+    return static_cast<int>(value);
 }
 
 int clampToFramebuffer(std::int64_t value, int framebufferExtent) {
@@ -152,6 +180,8 @@ RgbaReadback readRgbaFramebufferRegion(CFramebuffer& framebuffer, int cropX, int
         return {};
 
     RgbaReadback readback;
+    readback.cropX = region.outputCropX;
+    readback.cropTopY = region.outputCropTopY;
     readback.width = region.outputWidth;
     readback.height = region.outputHeight;
     readback.pixels.assign(region.outputBytes, 0);
@@ -204,6 +234,174 @@ bool writeFileExclusive(const std::filesystem::path& path, const std::vector<uns
     return close(fd) == 0;
 }
 
+unsigned char alphaAt(const RgbaReadback& readback, int x, int y) {
+    const auto i = (static_cast<std::size_t>(y) * readback.width + x) * 4U + 3U;
+    return readback.pixels[i];
+}
+
+bool findAlphaBounds(const RgbaReadback& readback, PixelBounds& bounds) {
+    if (readback.width <= 0 || readback.height <= 0 || readback.pixels.empty())
+        return false;
+
+    int minX = readback.width;
+    int minY = readback.height;
+    int maxX = -1;
+    int maxY = -1;
+
+    for (int y = 0; y < readback.height; ++y) {
+        for (int x = 0; x < readback.width; ++x) {
+            if (alphaAt(readback, x, y) == 0)
+                continue;
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+        }
+    }
+
+    if (maxX < minX || maxY < minY)
+        return false;
+
+    bounds = {.x = minX, .y = minY, .width = maxX - minX + 1, .height = maxY - minY + 1};
+    return true;
+}
+
+RgbaReadback cropReadback(const RgbaReadback& readback, const PixelBounds& bounds) {
+    if (bounds.width <= 0 || bounds.height <= 0 || readback.pixels.empty())
+        return {};
+
+    std::size_t pixelBytes = 0;
+    if (!checkedRgbaByteSize(bounds.width, bounds.height, pixelBytes))
+        return {};
+
+    RgbaReadback cropped;
+    cropped.cropX = readback.cropX + bounds.x;
+    cropped.cropTopY = readback.cropTopY + bounds.y;
+    cropped.width = bounds.width;
+    cropped.height = bounds.height;
+    cropped.pixels.assign(pixelBytes, 0);
+
+    const std::size_t rowBytes = static_cast<std::size_t>(bounds.width) * RGBA_BYTES_PER_PIXEL;
+    for (int y = 0; y < bounds.height; ++y) {
+        const auto* src = readback.pixels.data() + (static_cast<std::size_t>(bounds.y + y) * readback.width + bounds.x) * RGBA_BYTES_PER_PIXEL;
+        auto*       dst = cropped.pixels.data() + static_cast<std::size_t>(y) * rowBytes;
+        std::copy(src, src + rowBytes, dst);
+    }
+
+    return cropped;
+}
+
+void unpremultiplyAlpha(RgbaReadback& readback) {
+    if (readback.pixels.empty())
+        return;
+
+    for (std::size_t i = 0; i + 3 < readback.pixels.size(); i += 4U) {
+        const auto alpha = readback.pixels[i + 3];
+        if (alpha == 0) {
+            readback.pixels[i] = 0;
+            readback.pixels[i + 1] = 0;
+            readback.pixels[i + 2] = 0;
+            continue;
+        }
+        if (alpha == 255)
+            continue;
+
+        for (int channel = 0; channel < 3; ++channel) {
+            const int straight = (static_cast<int>(readback.pixels[i + channel]) * 255 + alpha / 2) / alpha;
+            readback.pixels[i + channel] = static_cast<unsigned char>(std::min(255, straight));
+        }
+    }
+}
+
+class FullSurfaceVisibleRegionOverride {
+  public:
+    explicit FullSurfaceVisibleRegionOverride(const PHLWINDOW& window) {
+        if (!window || !window->wlSurface() || !window->wlSurface()->resource())
+            return;
+
+        window->wlSurface()->resource()->breadthfirst(
+            [this](SP<CWLSurfaceResource> resource, const Vector2D&, void*) {
+                auto surface = Desktop::View::CWLSurface::fromResource(resource);
+                if (!surface)
+                    return;
+
+                m_records.push_back({.surface = surface, .visibleRegion = surface->m_visibleRegion});
+
+                const int width = std::max(1, static_cast<int>(std::lround(resource->m_current.bufferSize.x > 0 ? resource->m_current.bufferSize.x :
+                                                                                                                 resource->m_current.size.x)));
+                const int height = std::max(1, static_cast<int>(std::lround(resource->m_current.bufferSize.y > 0 ? resource->m_current.bufferSize.y :
+                                                                                                                   resource->m_current.size.y)));
+                surface->m_visibleRegion = CRegion{0, 0, width, height};
+            },
+            nullptr);
+    }
+
+    ~FullSurfaceVisibleRegionOverride() {
+        for (auto& record : m_records) {
+            if (record.surface)
+                record.surface->m_visibleRegion = record.visibleRegion;
+        }
+    }
+
+    FullSurfaceVisibleRegionOverride(const FullSurfaceVisibleRegionOverride&) = delete;
+    FullSurfaceVisibleRegionOverride& operator=(const FullSurfaceVisibleRegionOverride&) = delete;
+
+  private:
+    struct Record {
+        SP<Desktop::View::CWLSurface> surface;
+        CRegion                      visibleRegion;
+    };
+
+    std::vector<Record> m_records;
+};
+
+CBox renderedWindowBox(const PHLWINDOW& window, CBox box) {
+    if (window->m_workspace && !window->m_pinned)
+        box.translate(window->m_workspace->m_renderOffset->value());
+    box.translate(window->m_floatingOffset);
+    return box;
+}
+
+class WindowAnimationGoalOverride {
+  public:
+    explicit WindowAnimationGoalOverride(const PHLWINDOW& window) : m_window(window) {
+        if (!m_window || !m_window->m_realPosition || !m_window->m_realSize)
+            return;
+
+        m_position = m_window->m_realPosition->value();
+        m_size = m_window->m_realSize->value();
+        m_active = true;
+        setPositionOffset({});
+    }
+
+    void setPositionOffset(const Vector2D& offset) {
+        if (!m_active || !m_window || !m_window->m_realPosition || !m_window->m_realSize)
+            return;
+
+        m_window->m_realPosition->value() = m_window->m_realPosition->goal() + offset;
+        m_window->m_realSize->value() = m_window->m_realSize->goal();
+        m_window->updateWindowDecos();
+    }
+
+    ~WindowAnimationGoalOverride() {
+        if (!m_active || !m_window || !m_window->m_realPosition || !m_window->m_realSize)
+            return;
+
+        m_window->m_realPosition->value() = m_position;
+        m_window->m_realSize->value() = m_size;
+        m_window->updateWindowDecos();
+    }
+
+    WindowAnimationGoalOverride(const WindowAnimationGoalOverride&) = delete;
+    WindowAnimationGoalOverride& operator=(const WindowAnimationGoalOverride&) = delete;
+
+  private:
+    PHLWINDOW m_window;
+    Vector2D  m_position;
+    Vector2D  m_size;
+    bool      m_active = false;
+};
+
 bool renderMonitorArtifact(const PHLMONITOR& monitor, const Time::steady_tp& frozenTime, const std::filesystem::path& path, int& width, int& height) {
     if (!monitor || !monitor->m_activeWorkspace || !g_pHyprRenderer || !g_pHyprOpenGL)
         return false;
@@ -239,6 +437,88 @@ bool renderMonitorArtifact(const PHLMONITOR& monitor, const Time::steady_tp& fro
 
     const auto readback = readRgbaFramebufferRegion(framebuffer, 0, 0, width, height);
     return !readback.pixels.empty() && writeFileExclusive(path, readback.pixels);
+}
+
+bool renderWindowArtifact(const PHLWINDOW& window,
+                          const PHLMONITOR& monitor,
+                          const Time::steady_tp& frozenTime,
+                          const std::filesystem::path& path,
+                          int& width,
+                          int& height,
+                          CBox& artifactBox) {
+    if (!window || !monitor || !g_pHyprRenderer || !g_pHyprOpenGL)
+        return false;
+
+    WindowAnimationGoalOverride windowGoal(window);
+    const CBox fullBox = renderedWindowBox(window, window->getFullWindowBoundingBox());
+    CBox sourceCropBox = fullBox.copy().translate(-monitor->m_position).scale(monitor->m_scale <= 0.0 ? 1.0 : monitor->m_scale).round();
+    width = positiveIntFromDouble(sourceCropBox.w);
+    height = positiveIntFromDouble(sourceCropBox.h);
+
+    const int framebufferWidth = positiveRoundedIntFromDouble(monitor->m_pixelSize.x);
+    const int framebufferHeight = positiveRoundedIntFromDouble(monitor->m_pixelSize.y);
+    std::size_t framebufferBytes = 0;
+    std::size_t cropBytes = 0;
+    if (!checkedRgbaByteSize(framebufferWidth, framebufferHeight, framebufferBytes) || !checkedRgbaByteSize(width, height, cropBytes))
+        return false;
+
+    const double scale = monitor->m_scale <= 0.0 ? 1.0 : monitor->m_scale;
+    const int targetCropX = width < framebufferWidth ? (framebufferWidth - width) / 2 : 0;
+    const int targetCropY = height < framebufferHeight ? (framebufferHeight - height) / 2 : 0;
+    const Vector2D renderOffset = monitor->m_position + Vector2D{targetCropX / scale, targetCropY / scale} - fullBox.pos();
+    windowGoal.setPositionOffset(renderOffset);
+    CBox renderCropBox = fullBox.copy().translate(renderOffset).translate(-monitor->m_position).scale(scale).round();
+
+    CFramebuffer framebuffer;
+    const auto   drmFormat = monitor->m_output && monitor->m_output->state ? monitor->m_output->state->state().drmFormat : DRM_FORMAT_ABGR8888;
+    if (!framebuffer.alloc(framebufferWidth, framebufferHeight, DRM_FORMAT_ABGR8888) && !framebuffer.alloc(framebufferWidth, framebufferHeight, drmFormat))
+        return false;
+
+    const bool previousBlockFeedback = g_pHyprRenderer->m_bBlockSurfaceFeedback;
+    const bool previousBlockShader = g_pHyprOpenGL->m_renderData.blockScreenShader;
+    const bool previousRenderingSnapshot = g_pHyprRenderer->m_bRenderingSnapshot;
+    CRegion    fakeDamage{0, 0, framebufferWidth, framebufferHeight};
+
+    g_pHyprRenderer->makeEGLCurrent();
+    g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
+    if (!g_pHyprRenderer->beginRender(monitor, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &framebuffer)) {
+        g_pHyprRenderer->m_bBlockSurfaceFeedback = previousBlockFeedback;
+        return false;
+    }
+
+    g_pHyprRenderer->m_bRenderingSnapshot = true;
+    {
+        FullSurfaceVisibleRegionOverride fullVisibleRegion(window);
+        g_pHyprOpenGL->clear(CHyprColor{0.0, 0.0, 0.0, 0.0});
+        g_pHyprRenderer->renderWindow(window, monitor, frozenTime, true, RENDER_PASS_ALL, false, false);
+    }
+    g_pHyprRenderer->m_bRenderingSnapshot = previousRenderingSnapshot;
+
+    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+    g_pHyprRenderer->endRender();
+    g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockShader;
+    g_pHyprRenderer->m_bBlockSurfaceFeedback = previousBlockFeedback;
+
+    const int cropX = clampedIntFromDouble(renderCropBox.x);
+    const int cropY = clampedIntFromDouble(renderCropBox.y);
+    auto      readback = readRgbaFramebufferRegion(framebuffer, 0, 0, framebufferWidth, framebufferHeight);
+    if (readback.pixels.empty())
+        return false;
+
+    PixelBounds bounds;
+    if (findAlphaBounds(readback, bounds))
+        readback = cropReadback(readback, bounds);
+    else
+        readback = readRgbaFramebufferRegion(framebuffer, cropX, cropY, width, height);
+    if (readback.pixels.empty())
+        return false;
+
+    width = readback.width;
+    height = readback.height;
+    artifactBox = CBox{fullBox.x + (readback.cropX - cropX) / scale, fullBox.y + (readback.cropTopY - cropY) / scale, width / scale, height / scale};
+
+    unpremultiplyAlpha(readback);
+    return writeFileExclusive(path, readback.pixels);
 }
 
 Json rectJson(const CBox& box) {
@@ -285,7 +565,7 @@ std::string sessionId() {
 
 } // namespace
 
-ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJsonPath) {
+ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJsonPath, std::string_view targetRegex) {
     if (!g_pCompositor || !g_pHyprRenderer || !g_pHyprOpenGL)
         return {.success = false, .error = "Hyprland renderer is not ready"};
     if (outputJsonPath.empty())
@@ -306,6 +586,7 @@ ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJso
 
     Json root;
     root["id"] = id;
+    root["mode"] = targetRegex.empty() ? "monitors" : "window";
     root["monitors"] = Json::array();
     root["windows"] = Json::array();
 
@@ -315,6 +596,49 @@ ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJso
     }
 
     const auto frozenTime = Time::steadyNow();
+    if (!targetRegex.empty()) {
+        const auto window = g_pCompositor->getWindowByRegex(std::string(targetRegex));
+        if (!window || !window->m_isMapped)
+            return {.success = false, .error = "target window not found"};
+
+        const auto monitor = window->m_monitor.lock();
+        if (!monitor)
+            return {.success = false, .error = "target window has no monitor"};
+
+        int        width = 0;
+        int        height = 0;
+        CBox       artifactBox;
+        const auto artifactPath = artifactRoot / ("window-" + pointerId(window.get()) + ".rgba");
+        if (!renderWindowArtifact(window, monitor, frozenTime, artifactPath, width, height, artifactBox))
+            return {.success = false, .error = "failed to render target window"};
+
+        const double scale = monitor->m_scale <= 0.0 ? 1.0 : monitor->m_scale;
+        root["target"] = windowJson(window);
+        root["target"]["artifactPath"] = artifactPath.string();
+        root["target"]["artifactWidth"] = width;
+        root["target"]["artifactHeight"] = height;
+        root["target"]["artifactTopDown"] = true;
+        root["target"]["artifactGeometry"] = rectJson(artifactBox);
+        root["monitors"].push_back(Json{
+            {"name", "window:" + boundedString(window->m_title, 4096)},
+            {"geometry", rectJson(artifactBox)},
+            {"scale", scale},
+            {"transform", 0},
+            {"artifactPath", artifactPath.string()},
+            {"artifactWidth", width},
+            {"artifactHeight", height},
+            {"artifactTopDown", true},
+        });
+        root["windows"].push_back(windowJson(window));
+
+        const auto serialized = root.dump(2, ' ', false, Json::error_handler_t::replace);
+        std::vector<unsigned char> bytes(serialized.begin(), serialized.end());
+        if (!writeFileExclusive(outputJsonPath, bytes))
+            return {.success = false, .error = "failed to write output json"};
+
+        return {.success = true};
+    }
+
     int        monitorIndex = 0;
     for (const auto& monitor : g_pCompositor->m_monitors) {
         if (!monitor)

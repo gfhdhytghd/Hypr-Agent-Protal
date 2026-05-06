@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <string>
+#include <string_view>
 
 namespace hyprcum {
 
@@ -10,6 +11,6 @@ struct ScreenshotResult {
     std::string error;
 };
 
-ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJsonPath);
+ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJsonPath, std::string_view targetRegex = {});
 
 } // namespace hyprcum

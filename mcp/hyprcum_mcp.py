@@ -59,7 +59,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         },
         "target": {
             "type": "string",
-            "description": "Hyprland window selector, for example address:0x1234. Required for pointer actions.",
+            "description": "Hyprland window selector, for example address:0x1234. Optional for screenshot; required for input actions.",
         },
         "x": {"type": "number", "description": "Global logical X coordinate."},
         "y": {"type": "number", "description": "Global logical Y coordinate."},
@@ -223,7 +223,11 @@ def paste(target: str, args: dict[str, Any], methods: list[str]) -> dict[str, An
 def computer(args: dict[str, Any]) -> dict[str, Any]:
     action = args.get("action")
     if action == "screenshot":
-        info = call_ctl(["screenshot", "--base64"])
+        cmd = ["screenshot", "--base64"]
+        target = args.get("target")
+        if isinstance(target, str) and target:
+            cmd.extend(["--target", target])
+        info = call_ctl(cmd)
         data = info.pop("pngBase64")
         text = json.dumps(info, ensure_ascii=False)
         return {
@@ -345,7 +349,7 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
             req_id,
             {
                 "protocolVersion": "2025-06-18",
-                "serverInfo": {"name": "hyprcum", "version": "0.2.0"},
+                "serverInfo": {"name": "hyprcum", "version": "0.2.1"},
                 "capabilities": {"tools": {"listChanged": False}},
             },
         )
