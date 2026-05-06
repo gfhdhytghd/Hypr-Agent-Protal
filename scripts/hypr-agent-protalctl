@@ -62,6 +62,48 @@ def rgba_to_png(width: int, height: int, rgba: bytes) -> bytes:
     )
 
 
+def resize_rgba_bilinear(src: bytes, src_w: int, src_h: int, dst_w: int, dst_h: int) -> bytes:
+    if dst_w <= 0 or dst_h <= 0:
+        raise ValueError("invalid resized image dimensions")
+    if src_w == dst_w and src_h == dst_h:
+        return src
+
+    dst = bytearray(dst_w * dst_h * 4)
+    x_ratio = src_w / dst_w
+    y_ratio = src_h / dst_h
+    for y in range(dst_h):
+        sy = (y + 0.5) * y_ratio - 0.5
+        y0 = max(0, min(src_h - 1, int(sy)))
+        y1 = max(0, min(src_h - 1, y0 + 1))
+        wy = sy - y0
+        if wy < 0:
+            wy = 0.0
+        for x in range(dst_w):
+            sx = (x + 0.5) * x_ratio - 0.5
+            x0 = max(0, min(src_w - 1, int(sx)))
+            x1 = max(0, min(src_w - 1, x0 + 1))
+            wx = sx - x0
+            if wx < 0:
+                wx = 0.0
+            i00 = (y0 * src_w + x0) * 4
+            i10 = (y0 * src_w + x1) * 4
+            i01 = (y1 * src_w + x0) * 4
+            i11 = (y1 * src_w + x1) * 4
+            out = (y * dst_w + x) * 4
+            for channel in range(4):
+                top = src[i00 + channel] * (1.0 - wx) + src[i10 + channel] * wx
+                bottom = src[i01 + channel] * (1.0 - wx) + src[i11 + channel] * wx
+                dst[out + channel] = max(0, min(255, round(top * (1.0 - wy) + bottom * wy)))
+    return bytes(dst)
+
+
+def model_output_dimensions(width: int, height: int, max_dimension: int) -> tuple[int, int]:
+    if max_dimension <= 0 or max(width, height) <= max_dimension:
+        return width, height
+    scale = max_dimension / max(width, height)
+    return max(1, round(width * scale)), max(1, round(height * scale))
+
+
 def state_root(output_dir: str | None = None) -> pathlib.Path:
     root = pathlib.Path(output_dir or tempfile.gettempdir()) / f"hypr-agent-protal-{os.getuid()}"
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -173,7 +215,7 @@ def draw_cursor_indicator(canvas: bytearray, width: int, height: int, x: int, y:
         blend_rect(canvas, width, height, x + cx * unit, y + cy * unit, unit, (18, 18, 18, 245))
 
 
-def render_session_png(session: dict, *, cursor_source: str = "none", cursor_path: pathlib.Path | None = None) -> tuple[bytes, dict]:
+def render_session_png(session: dict, *, cursor_source: str = "none", cursor_path: pathlib.Path | None = None, max_dimension: int = 0) -> tuple[bytes, dict]:
     monitors = [m for m in session.get("monitors", []) if m.get("artifactPath") and m.get("artifactWidth") and m.get("artifactHeight")]
     if not monitors:
         raise RuntimeError("no rendered monitor artifacts in screenshot session")
@@ -228,10 +270,34 @@ def render_session_png(session: dict, *, cursor_source: str = "none", cursor_pat
                 draw_cursor_indicator(canvas, out_w, out_h, pixel_x, pixel_y, out_scale)
                 indicator_pixel = {"x": pixel_x, "y": pixel_y}
 
+    source_w = out_w
+    source_h = out_h
+    source_scale = out_scale
+    model_w, model_h = model_output_dimensions(out_w, out_h, max_dimension)
+    if model_w != out_w or model_h != out_h:
+        canvas_bytes = resize_rgba_bilinear(bytes(canvas), out_w, out_h, model_w, model_h)
+        out_w = model_w
+        out_h = model_h
+    else:
+        canvas_bytes = bytes(canvas)
+    logical_width = max_x - min_x
+    logical_height = max_y - min_y
+    out_scale_x = out_w / logical_width if logical_width > 0 else out_scale
+    out_scale_y = out_h / logical_height if logical_height > 0 else out_scale
+
     metadata = {
         "width": out_w,
         "height": out_h,
-        "scale": out_scale,
+        "scale": out_scale_x,
+        "scaleX": out_scale_x,
+        "scaleY": out_scale_y,
+        "sourceWidth": source_w,
+        "sourceHeight": source_h,
+        "sourceScale": source_scale,
+        "modelDownsample": {
+            "enabled": source_w != out_w or source_h != out_h,
+            "maxDimension": max_dimension,
+        },
         "logicalBounds": {"x": min_x, "y": min_y, "width": max_x - min_x, "height": max_y - min_y},
         "cursorPosition": indicator_position or session.get("cursorPosition"),
         "compositorCursorPosition": session.get("cursorPosition"),
@@ -254,7 +320,7 @@ def render_session_png(session: dict, *, cursor_source: str = "none", cursor_pat
             for m in monitors
         ],
     }
-    return rgba_to_png(out_w, out_h, bytes(canvas)), metadata
+    return rgba_to_png(out_w, out_h, canvas_bytes), metadata
 
 
 def hyprctl_environment() -> dict[str, str]:
@@ -312,7 +378,7 @@ def screenshot(args: argparse.Namespace) -> int:
 
     session = json.loads(session_path.read_text())
     cursor_source = "none" if args.no_cursor else args.cursor_source
-    png, metadata = render_session_png(session, cursor_source=cursor_source, cursor_path=root / "cursor.json")
+    png, metadata = render_session_png(session, cursor_source=cursor_source, cursor_path=root / "cursor.json", max_dimension=max(0, int(args.max_dimension or 0)))
 
     png_path = session_path.with_suffix(".png")
     png_path.write_bytes(png)
@@ -489,6 +555,7 @@ def build_parser() -> argparse.ArgumentParser:
     shot.add_argument("--output-dir")
     shot.add_argument("--target", help="optional Hyprland window selector for unoccluded target-window capture")
     shot.add_argument("--base64", action="store_true")
+    shot.add_argument("--max-dimension", type=int, default=0, help="downsample the returned PNG so its longest edge is at most this many pixels; 0 keeps full resolution")
     shot.add_argument("--no-cursor", action="store_true", help="do not draw the cursor indicator on the returned PNG")
     shot.add_argument(
         "--cursor-source",

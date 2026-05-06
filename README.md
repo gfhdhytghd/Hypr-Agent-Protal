@@ -136,6 +136,14 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 
 The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch. Compatibility calls that provide `target` instead of `app` use the same target-relative conversion unless `coordinate_space=global` is explicit.
 
+Screenshots returned to MCP clients are downsampled for model use by default.
+The longest image edge is capped at 1024 pixels, controlled by
+`HYPR_AGENT_PROTAL_MODEL_MAX_DIMENSION`; set it to `0` to return full
+resolution. `get_app_state` reports the model image size in `screenshot.width`
+and `screenshot.height`, and keeps the original capture size in
+`sourceWidth/sourceHeight`. Screenshot coordinates always refer to the image
+actually sent to the model.
+
 ### AT-SPI App State
 
 Linux does not expose a system-wide accessibility model as consistently as macOS Accessibility. `get_app_state` therefore treats AT-SPI as a semantic enhancement on top of compositor screenshots, not as the only source of truth.
@@ -214,6 +222,7 @@ The command-line bridge is also usable directly:
 ```sh
 scripts/hypr-agent-protalctl screenshot --base64
 scripts/hypr-agent-protalctl screenshot --target 'address:0x1234' --base64
+scripts/hypr-agent-protalctl screenshot --target 'address:0x1234' --base64 --max-dimension 1024
 scripts/hypr-agent-protalctl screenshot --cursor-source agent --base64
 scripts/hypr-agent-protalctl windows
 scripts/hypr-agent-protalctl windows --related-to 'address:0x1234'

@@ -76,6 +76,21 @@ def main() -> int:
     assert shadow_pos["insideScreenshot"] is True
     assert shadow_pos["insideWindow"] is False
 
+    model_screenshot = {
+        "width": 1024,
+        "height": 603,
+        "scale": 0.7155835080363382,
+        "scaleX": 0.7155835080363382,
+        "scaleY": 0.7153024911032029,
+        "logicalBounds": screenshot["logicalBounds"],
+    }
+    model_snapshot = {"window": window, "screenshot": model_screenshot}
+    near(mcp.screenshot_point_to_global(model_snapshot, 0, 0)[0], 1764.5)
+    near(mcp.screenshot_point_to_global(model_snapshot, 0, 0)[1], 2100.5)
+    model_pos = mcp.snapshot_position(model_snapshot, 1764.5 + 100, 2100.5 + 100)
+    near(model_pos["screenshot"]["x"], 71.55835080363382)
+    near(model_pos["screenshot"]["y"], 71.53024911032029)
+
     original_related_windows_for = mcp.related_windows_for
     try:
         mcp.related_windows_for = lambda target: [

@@ -53,6 +53,14 @@ def main() -> int:
         assert metadata["cursorIndicator"]["enabled"] is False
         assert metadata["cursorIndicator"]["visible"] is False
 
+        small_png, small_metadata = ctl.render_session_png(session, max_dimension=5)
+        assert small_png.startswith(b"\x89PNG\r\n\x1a\n")
+        assert small_metadata["width"] == 5
+        assert small_metadata["height"] == 5
+        assert small_metadata["sourceWidth"] == 10
+        assert small_metadata["sourceHeight"] == 10
+        assert small_metadata["modelDownsample"]["enabled"] is True
+
     return 0
 
 

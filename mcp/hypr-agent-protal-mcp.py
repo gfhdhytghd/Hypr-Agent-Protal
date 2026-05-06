@@ -15,9 +15,10 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.24"
+SERVER_VERSION = "0.3.25"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
+DEFAULT_MODEL_SCREENSHOT_MAX_DIMENSION = 1024
 
 _ATSPI_INIT_ERROR: str | None | bool = None
 _ATSPI: Any = None
@@ -705,6 +706,23 @@ def mcp_snapshot_result(snapshot: dict[str, Any]) -> dict[str, Any]:
         content.append({"type": "image", "mimeType": "image/png", "data": image})
     structured = {k: v for k, v in snapshot.items() if k not in {"screenshotPngBase64", "activeRelatedScreenshotPngBase64"}}
     return {"content": content, "structuredContent": structured, "isError": False}
+
+
+def model_screenshot_max_dimension() -> int:
+    raw = os.environ.get("HYPR_AGENT_PROTAL_MODEL_MAX_DIMENSION")
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = DEFAULT_MODEL_SCREENSHOT_MAX_DIMENSION
+        return max(0, value)
+    return DEFAULT_MODEL_SCREENSHOT_MAX_DIMENSION
+
+
+def screenshot_command_base() -> list[str]:
+    max_dimension = model_screenshot_max_dimension()
+    cmd = ["screenshot", "--base64", "--max-dimension", str(max_dimension)]
+    return cmd
 
 
 def require_target(args: dict[str, Any]) -> str:
@@ -1458,10 +1476,9 @@ def lookup_element(snapshot: dict[str, Any], element_index: str) -> dict[str, An
 def screenshot_point_to_global(snapshot: dict[str, Any], x: float, y: float) -> tuple[float, float]:
     screenshot = snapshot.get("screenshot") or {}
     bounds = screenshot.get("logicalBounds") or {}
-    scale = float(screenshot.get("scale") or 1.0)
-    if scale <= 0:
-        scale = 1.0
-    return float(bounds.get("x") or 0.0) + float(x) / scale, float(bounds.get("y") or 0.0) + float(y) / scale
+    sx = screenshot_axis_scale(screenshot, "x")
+    sy = screenshot_axis_scale(screenshot, "y")
+    return float(bounds.get("x") or 0.0) + float(x) / sx, float(bounds.get("y") or 0.0) + float(y) / sy
 
 
 def window_point_to_global(snapshot: dict[str, Any], x: float, y: float) -> tuple[float, float]:
@@ -1510,9 +1527,8 @@ def point_from_args(args: dict[str, Any], *, prefix: str = "", coordinate_key: s
 def snapshot_position(snapshot: dict[str, Any], global_x: float, global_y: float) -> dict[str, Any]:
     screenshot = snapshot.get("screenshot") or {}
     bounds = screenshot.get("logicalBounds") or {}
-    scale = float(screenshot.get("scale") or 1.0)
-    if scale <= 0:
-        scale = 1.0
+    sx = screenshot_axis_scale(screenshot, "x")
+    sy = screenshot_axis_scale(screenshot, "y")
     left = float(bounds.get("x") or 0.0)
     top = float(bounds.get("y") or 0.0)
     width = float(bounds.get("width") or 0.0)
@@ -1524,10 +1540,10 @@ def snapshot_position(snapshot: dict[str, Any], global_x: float, global_y: float
     window_height = float(geom.get("height") or height)
     window_x = global_x - origin_x
     window_y = global_y - origin_y
-    screenshot_x = (global_x - left) * scale
-    screenshot_y = (global_y - top) * scale
-    screenshot_width = float(screenshot.get("width") or width * scale)
-    screenshot_height = float(screenshot.get("height") or height * scale)
+    screenshot_x = (global_x - left) * sx
+    screenshot_y = (global_y - top) * sy
+    screenshot_width = float(screenshot.get("width") or width * sx)
+    screenshot_height = float(screenshot.get("height") or height * sy)
     return {
         "window": {"x": window_x, "y": window_y, "coordinateSpace": "window"},
         "screenshot": {"x": screenshot_x, "y": screenshot_y, "coordinateSpace": "screenshot"},
@@ -1657,7 +1673,7 @@ def cursor_state_path() -> pathlib.Path:
 
 
 def screenshot_for_window(window: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    info = call_ctl(["screenshot", "--target", window_selector(window), "--base64", "--no-cursor"])
+    info = call_ctl([*screenshot_command_base(), "--target", window_selector(window), "--no-cursor"])
     data = info.pop("pngBase64")
     return info, data
 
@@ -3168,7 +3184,7 @@ def tool_get_app_state(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def tool_screenshot(args: dict[str, Any]) -> dict[str, Any]:
-    cmd = ["screenshot", "--base64"]
+    cmd = screenshot_command_base()
     app = args.get("app")
     target = args.get("target")
     if isinstance(app, str) and app:
@@ -3670,7 +3686,7 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
             return semantic_drag(mapped)
 
     if action == "screenshot":
-        cmd = ["screenshot", "--base64"]
+        cmd = screenshot_command_base()
         target = args.get("target")
         app = args.get("app")
         if (not isinstance(target, str) or not target) and isinstance(app, str) and app:
