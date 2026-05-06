@@ -7,12 +7,15 @@
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/managers/SeatManager.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
 #include <algorithm>
 #include <any>
 #include <charconv>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <filesystem>
@@ -28,6 +31,8 @@
 inline HANDLE g_pluginHandle = nullptr;
 
 namespace {
+
+std::vector<SP<CEventLoopTimer>> g_pointerRestoreTimers;
 
 template <typename T>
 T configValue(const std::string& name, T fallback) {
@@ -351,6 +356,7 @@ std::optional<TargetSurface> resolveTargetMainSurface(const std::string& targetR
 struct PointerFocusRestore {
     SP<CWLSurfaceResource> previousSurface;
     Vector2D               previousLocal;
+    bool                   restored = false;
 
     PointerFocusRestore() {
         if (!g_pSeatManager)
@@ -360,10 +366,65 @@ struct PointerFocusRestore {
     }
 
     ~PointerFocusRestore() {
-        if (!g_pSeatManager)
+        restoreNow(false);
+    }
+
+    void restoreNow(bool resetCurrentXWaylandFocus) {
+        if (restored || !g_pSeatManager)
             return;
+
+        if (resetCurrentXWaylandFocus) {
+            g_pSeatManager->m_state.pointerFocus.reset();
+            g_pSeatManager->m_state.pointerFocusResource.reset();
+        }
+
+        restored = true;
         g_pSeatManager->setPointerFocus(previousSurface, previousLocal);
         g_pSeatManager->sendPointerFrame();
+    }
+
+    void restoreLater(Time::steady_dur delay, bool resetCurrentXWaylandFocus) {
+        if (restored || !g_pEventLoopManager)
+            return;
+
+        auto previous = previousSurface;
+        auto local = previousLocal;
+        auto timer = makeShared<CEventLoopTimer>(
+            delay,
+            [previous, local, resetCurrentXWaylandFocus](SP<CEventLoopTimer> self, void*) {
+                if (g_pSeatManager) {
+                    if (resetCurrentXWaylandFocus) {
+                        g_pSeatManager->m_state.pointerFocus.reset();
+                        g_pSeatManager->m_state.pointerFocusResource.reset();
+                    }
+                    g_pSeatManager->setPointerFocus(previous, local);
+                    g_pSeatManager->sendPointerFrame();
+                }
+
+                if (g_pEventLoopManager)
+                    g_pEventLoopManager->removeTimer(self);
+
+                g_pointerRestoreTimers.erase(
+                    std::remove_if(g_pointerRestoreTimers.begin(), g_pointerRestoreTimers.end(), [&self](const auto& item) { return item.get() == self.get(); }),
+                    g_pointerRestoreTimers.end());
+            },
+            nullptr);
+
+        restored = true;
+        g_pointerRestoreTimers.push_back(timer);
+        g_pEventLoopManager->addTimer(timer);
+    }
+
+    void restoreForTarget(const TargetSurface& target) {
+        if (!g_pSeatManager)
+            return;
+
+        if (target.window && target.window->m_isX11) {
+            restoreLater(std::chrono::milliseconds(75), true);
+            return;
+        }
+
+        restoreNow(false);
     }
 
     PointerFocusRestore(const PointerFocusRestore&) = delete;
@@ -390,7 +451,7 @@ struct KeyboardFocusRestore {
     KeyboardFocusRestore& operator=(const KeyboardFocusRestore&) = delete;
 };
 
-void activateXWaylandKeyboardTarget(const TargetSurface& target) {
+void activateXWaylandTarget(const TargetSurface& target) {
     if (!target.window || !target.window->m_isX11 || !target.window->m_xwaylandSurface)
         return;
 
@@ -436,11 +497,13 @@ SDispatchResult dispatchPointer(const std::string& args) {
         return {.success = false, .error = "unknown pointer button"};
 
     PointerFocusRestore restore;
+    activateXWaylandTarget(*target);
     g_pSeatManager->setPointerFocus(target->surface, target->local);
     g_pSeatManager->sendPointerMotion(nowMs(), target->local);
 
     if (action == "move" || action == "motion") {
         g_pSeatManager->sendPointerFrame();
+        restore.restoreForTarget(*target);
         return {.success = true};
     }
 
@@ -450,6 +513,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         if (!dx || !dy)
             return {.success = false, .error = "scroll dx/dy must be finite numbers"};
         sendPointerScroll(*dx, *dy);
+        restore.restoreForTarget(*target);
         return {.success = true};
     }
 
@@ -457,6 +521,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
+        restore.restoreForTarget(*target);
         return {.success = true};
     }
 
@@ -466,18 +531,21 @@ SDispatchResult dispatchPointer(const std::string& args) {
             g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         }
         g_pSeatManager->sendPointerFrame();
+        restore.restoreForTarget(*target);
         return {.success = true};
     }
 
     if (action == "press" || action == "down") {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerFrame();
+        restore.restoreForTarget(*target);
         return {.success = true};
     }
 
     if (action == "release" || action == "up") {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
+        restore.restoreForTarget(*target);
         return {.success = true};
     }
 
@@ -525,7 +593,7 @@ SDispatchResult dispatchKeyboard(const std::string& args) {
     }
 
     KeyboardFocusRestore restore;
-    activateXWaylandKeyboardTarget(*target);
+    activateXWaylandTarget(*target);
     g_pSeatManager->setKeyboardFocus(target->surface);
 
     const auto pressModifiers = [&] {
@@ -611,5 +679,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
+    if (g_pEventLoopManager) {
+        for (const auto& timer : g_pointerRestoreTimers)
+            g_pEventLoopManager->removeTimer(timer);
+    }
+    g_pointerRestoreTimers.clear();
     g_pluginHandle = nullptr;
 }
