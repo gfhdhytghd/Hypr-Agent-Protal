@@ -70,7 +70,7 @@ constexpr double CODEX_CURSOR_HOTSPOT_X = 76.6;
 constexpr double CODEX_CURSOR_HOTSPOT_Y = 89.3;
 constexpr double CODEX_OFFICIAL_CURSOR_HOTSPOT_X = 120.7;
 constexpr double CODEX_OFFICIAL_CURSOR_HOTSPOT_Y = 140.6;
-constexpr double CODEX_CURSOR_LOGICAL_SIZE = 64.0;
+constexpr double CODEX_CURSOR_LOGICAL_SIZE = 128.0;
 constexpr double CODEX_CURSOR_MOTION_MS = 1429.1667;
 constexpr double CODEX_CURSOR_ANIMATION_MS = 1680.0;
 
@@ -1524,7 +1524,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.2.7",
+        .version = "0.2.8",
     };
 }
 
