@@ -12,7 +12,8 @@
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/render/Renderer.hpp>
-#include <hyprland/src/render/pass/RectPassElement.hpp>
+#include <hyprland/src/render/Texture.hpp>
+#include <hyprland/src/render/pass/TexPassElement.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
@@ -25,6 +26,7 @@
 #include <chrono>
 #include <cctype>
 #include <cmath>
+#include <drm_fourcc.h>
 #include <filesystem>
 #include <iterator>
 #include <limits>
@@ -47,29 +49,16 @@ SP<CEventLoopTimer>              g_indicatorHideTimer;
 SP<CEventLoopTimer>              g_indicatorAnimationTimer;
 CHyprSignalListener              g_windowOpenListener;
 CHyprSignalListener              g_renderStageListener;
+PHLWINDOWREF                     g_agentPointerWindow;
 std::optional<Vector2D>          g_agentPointerPosition;
 std::optional<Time::steady_tp>   g_agentPointerUpdated;
 std::string                      g_agentPointerAction;
+SP<CTexture>                     g_codexCursorTexture;
 
-constexpr std::array<std::string_view, 17> CODEX_CURSOR_BITMAP = {
-    "X              ",
-    "XX             ",
-    "XOX            ",
-    "XOOX           ",
-    "XOOOX          ",
-    "XOOOOX         ",
-    "XOOOOOX        ",
-    "XOOOOOOX       ",
-    "XOOOOOOOX      ",
-    "XOOOOOOOOX     ",
-    "XOOOOXXXXX     ",
-    "XOOX           ",
-    "XOXX           ",
-    "XX XX          ",
-    "X   XX         ",
-    "     XX        ",
-    "      XX       ",
-};
+constexpr int    CODEX_CURSOR_TEXTURE_SIZE = 96;
+constexpr double CODEX_CURSOR_HOTSPOT_X = 30.0;
+constexpr double CODEX_CURSOR_HOTSPOT_Y = 18.0;
+constexpr double CODEX_CURSOR_LOGICAL_SIZE = 42.0;
 
 template <typename T>
 T configValue(const std::string& name, T fallback) {
@@ -93,99 +82,169 @@ int configInt(const std::string& suffix, int fallback) {
 }
 
 CBox agentIndicatorBounds(const Vector2D& globalPos) {
-    return CBox{globalPos.x - 14.0, globalPos.y - 14.0, 76.0, 76.0};
+    return CBox{globalPos.x - 20.0, globalPos.y - 16.0, 70.0, 66.0};
 }
 
 void damageAgentIndicator() {
     if (!g_pHyprRenderer || !g_agentPointerPosition)
         return;
 
+    if (const auto window = g_agentPointerWindow.lock())
+        g_pHyprRenderer->damageWindow(window, true);
     g_pHyprRenderer->damageBox(agentIndicatorBounds(*g_agentPointerPosition));
 }
 
+int indicatorTimeoutMs() {
+    return std::clamp(configInt("indicator_timeout_ms", 12000), 0, 60000);
+}
+
 Time::steady_dur indicatorTimeout() {
-    return std::chrono::milliseconds(std::clamp(configInt("indicator_timeout_ms", 2600), 250, 15000));
+    return std::chrono::milliseconds(indicatorTimeoutMs());
 }
 
-bool cursorBitmapCellFilled(int x, int y) {
-    if (y < 0 || y >= static_cast<int>(CODEX_CURSOR_BITMAP.size()))
-        return false;
-    const auto row = CODEX_CURSOR_BITMAP[static_cast<size_t>(y)];
-    if (x < 0 || x >= static_cast<int>(row.size()))
-        return false;
-    return row[static_cast<size_t>(x)] != ' ';
-}
+struct Rgba {
+    double r = 0.0;
+    double g = 0.0;
+    double b = 0.0;
+    double a = 0.0;
+};
 
-void addIndicatorRect(const CBox& box, const CHyprColor& color, int round = 0) {
-    if (!g_pHyprRenderer || box.w <= 0.0 || box.h <= 0.0 || color.a <= 0.0F)
+void blendTexturePixel(std::vector<uint8_t>& pixels, int x, int y, const Rgba& color, double coverage = 1.0) {
+    if (x < 0 || y < 0 || x >= CODEX_CURSOR_TEXTURE_SIZE || y >= CODEX_CURSOR_TEXTURE_SIZE)
         return;
 
-    CRectPassElement::SRectData data;
-    data.box   = box;
-    data.color = color;
-    data.round = round;
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CRectPassElement>(data));
-}
-
-void addIndicatorCircle(const Vector2D& center, double diameter, const CHyprColor& color) {
-    if (diameter <= 0.0)
+    const double srcA = std::clamp(color.a * coverage, 0.0, 1.0);
+    if (srcA <= 0.0)
         return;
 
-    addIndicatorRect(CBox{center.x - diameter / 2.0, center.y - diameter / 2.0, diameter, diameter}, color, static_cast<int>(std::lround(diameter / 2.0)));
+    const auto   index = static_cast<size_t>((y * CODEX_CURSOR_TEXTURE_SIZE + x) * 4);
+    const double dstR = pixels[index] / 255.0;
+    const double dstG = pixels[index + 1] / 255.0;
+    const double dstB = pixels[index + 2] / 255.0;
+    const double dstA = pixels[index + 3] / 255.0;
+    const double outA = srcA + dstA * (1.0 - srcA);
+
+    if (outA <= 0.0) {
+        pixels[index] = pixels[index + 1] = pixels[index + 2] = pixels[index + 3] = 0;
+        return;
+    }
+
+    const auto toByte = [](double value) { return static_cast<uint8_t>(std::lround(std::clamp(value, 0.0, 1.0) * 255.0)); };
+    pixels[index] = toByte((color.r * srcA + dstR * dstA * (1.0 - srcA)) / outA);
+    pixels[index + 1] = toByte((color.g * srcA + dstG * dstA * (1.0 - srcA)) / outA);
+    pixels[index + 2] = toByte((color.b * srcA + dstB * dstA * (1.0 - srcA)) / outA);
+    pixels[index + 3] = toByte(outA);
 }
 
-void renderCodexCursorBitmap(const Vector2D& tip, double monitorScale, double fade) {
-    const double unit = std::max(1.0, 1.65 * monitorScale);
-    const auto   fill = CHyprColor(0.98F, 0.97F, 1.00F, static_cast<float>(0.96 * fade));
-    const auto   outline = CHyprColor(0.42F, 0.18F, 0.58F, static_cast<float>(0.82 * fade));
-    const auto   shadow = CHyprColor(0.0F, 0.0F, 0.0F, static_cast<float>(0.20 * fade));
-
-    const auto drawCell = [&](int x, int y, const Vector2D& offset, const CHyprColor& color, double expand = 0.35) {
-        addIndicatorRect(
-            CBox{tip.x + offset.x + x * unit, tip.y + offset.y + y * unit, unit + expand * monitorScale, unit + expand * monitorScale},
-            color);
-    };
-
-    const int rows = static_cast<int>(CODEX_CURSOR_BITMAP.size());
-    for (int y = 0; y < rows; ++y) {
-        const int cols = static_cast<int>(CODEX_CURSOR_BITMAP[static_cast<size_t>(y)].size());
-        for (int x = 0; x < cols; ++x) {
-            if (cursorBitmapCellFilled(x, y))
-                drawCell(x, y, Vector2D{1.4 * monitorScale, 2.0 * monitorScale}, shadow, 0.15);
+double circleCoverage(int x, int y, const Vector2D& center, double radius) {
+    constexpr int SAMPLES = 4;
+    int           inside = 0;
+    for (int sy = 0; sy < SAMPLES; ++sy) {
+        for (int sx = 0; sx < SAMPLES; ++sx) {
+            const double px = x + (sx + 0.5) / SAMPLES;
+            const double py = y + (sy + 0.5) / SAMPLES;
+            const double dx = px - center.x;
+            const double dy = py - center.y;
+            if (dx * dx + dy * dy <= radius * radius)
+                ++inside;
         }
     }
+    return static_cast<double>(inside) / (SAMPLES * SAMPLES);
+}
 
-    for (int y = -1; y <= rows; ++y) {
-        for (int x = -1; x <= 16; ++x) {
-            if (cursorBitmapCellFilled(x, y))
-                continue;
+void drawTextureCircle(std::vector<uint8_t>& pixels, const Vector2D& center, double radius, const Rgba& color) {
+    const int minX = std::max(0, static_cast<int>(std::floor(center.x - radius - 1.0)));
+    const int maxX = std::min(CODEX_CURSOR_TEXTURE_SIZE - 1, static_cast<int>(std::ceil(center.x + radius + 1.0)));
+    const int minY = std::max(0, static_cast<int>(std::floor(center.y - radius - 1.0)));
+    const int maxY = std::min(CODEX_CURSOR_TEXTURE_SIZE - 1, static_cast<int>(std::ceil(center.y + radius + 1.0)));
 
-            bool adjacent = false;
-            for (int oy = -1; oy <= 1 && !adjacent; ++oy) {
-                for (int ox = -1; ox <= 1; ++ox) {
-                    if (cursorBitmapCellFilled(x + ox, y + oy)) {
-                        adjacent = true;
-                        break;
-                    }
-                }
-            }
+    for (int y = minY; y <= maxY; ++y)
+        for (int x = minX; x <= maxX; ++x)
+            blendTexturePixel(pixels, x, y, color, circleCoverage(x, y, center, radius));
+}
 
-            if (adjacent)
-                drawCell(x, y, {}, outline, 0.15);
+template <size_t N>
+bool pointInPolygon(const std::array<Vector2D, N>& polygon, double x, double y) {
+    bool inside = false;
+    for (size_t i = 0, j = polygon.size() - 1; i < polygon.size(); j = i++) {
+        const auto& pi = polygon[i];
+        const auto& pj = polygon[j];
+        if (((pi.y > y) != (pj.y > y)) && (x < (pj.x - pi.x) * (y - pi.y) / (pj.y - pi.y) + pi.x))
+            inside = !inside;
+    }
+    return inside;
+}
+
+template <size_t N>
+double polygonCoverage(int x, int y, const std::array<Vector2D, N>& polygon) {
+    constexpr int SAMPLES = 4;
+    int           inside = 0;
+    for (int sy = 0; sy < SAMPLES; ++sy) {
+        for (int sx = 0; sx < SAMPLES; ++sx) {
+            const double px = x + (sx + 0.5) / SAMPLES;
+            const double py = y + (sy + 0.5) / SAMPLES;
+            if (pointInPolygon(polygon, px, py))
+                ++inside;
         }
     }
+    return static_cast<double>(inside) / (SAMPLES * SAMPLES);
+}
 
-    for (int y = 0; y < rows; ++y) {
-        const int cols = static_cast<int>(CODEX_CURSOR_BITMAP[static_cast<size_t>(y)].size());
-        for (int x = 0; x < cols; ++x) {
-            if (cursorBitmapCellFilled(x, y))
-                drawCell(x, y, {}, fill, 0.15);
-        }
+template <size_t N>
+void drawTexturePolygon(std::vector<uint8_t>& pixels, const std::array<Vector2D, N>& polygon, const Rgba& color) {
+    double minX = polygon[0].x, maxX = polygon[0].x;
+    double minY = polygon[0].y, maxY = polygon[0].y;
+    for (const auto& point : polygon) {
+        minX = std::min(minX, point.x);
+        maxX = std::max(maxX, point.x);
+        minY = std::min(minY, point.y);
+        maxY = std::max(maxY, point.y);
     }
+
+    const int startX = std::max(0, static_cast<int>(std::floor(minX - 1.0)));
+    const int endX = std::min(CODEX_CURSOR_TEXTURE_SIZE - 1, static_cast<int>(std::ceil(maxX + 1.0)));
+    const int startY = std::max(0, static_cast<int>(std::floor(minY - 1.0)));
+    const int endY = std::min(CODEX_CURSOR_TEXTURE_SIZE - 1, static_cast<int>(std::ceil(maxY + 1.0)));
+
+    for (int y = startY; y <= endY; ++y)
+        for (int x = startX; x <= endX; ++x)
+            blendTexturePixel(pixels, x, y, color, polygonCoverage(x, y, polygon));
+}
+
+SP<CTexture> codexCursorTexture() {
+    if (g_codexCursorTexture)
+        return g_codexCursorTexture;
+
+    std::vector<uint8_t> pixels(CODEX_CURSOR_TEXTURE_SIZE * CODEX_CURSOR_TEXTURE_SIZE * 4, 0);
+
+    drawTextureCircle(pixels, Vector2D{50.5, 45.5}, 33.0, Rgba{0.0, 0.0, 0.0, 0.16});
+    drawTextureCircle(pixels, Vector2D{47.5, 42.5}, 33.0, Rgba{1.0, 0.93, 1.0, 0.28});
+    drawTextureCircle(pixels, Vector2D{47.5, 42.5}, 30.5, Rgba{0.74, 0.34, 0.94, 0.58});
+    drawTextureCircle(pixels, Vector2D{45.0, 39.0}, 19.0, Rgba{0.98, 0.76, 1.0, 0.14});
+
+    const std::array<Vector2D, 7> shadow = {Vector2D{32, 20}, Vector2D{32, 68}, Vector2D{43, 57}, Vector2D{50, 79},
+                                            Vector2D{63, 75}, Vector2D{56, 55}, Vector2D{75, 55}};
+    const std::array<Vector2D, 7> outline = {Vector2D{27, 10}, Vector2D{27, 73}, Vector2D{41, 59}, Vector2D{48, 84},
+                                             Vector2D{68, 77}, Vector2D{60, 56}, Vector2D{82, 56}};
+    const std::array<Vector2D, 7> fill = {Vector2D{31, 18}, Vector2D{31, 64}, Vector2D{42, 53}, Vector2D{49, 75},
+                                          Vector2D{61, 71}, Vector2D{54, 51}, Vector2D{72, 51}};
+
+    drawTexturePolygon(pixels, shadow, Rgba{0.0, 0.0, 0.0, 0.20});
+    drawTexturePolygon(pixels, outline, Rgba{0.43, 0.18, 0.58, 0.90});
+    drawTexturePolygon(pixels, fill, Rgba{0.98, 0.97, 1.0, 0.98});
+
+    g_codexCursorTexture = makeShared<CTexture>(DRM_FORMAT_ABGR8888, pixels.data(), CODEX_CURSOR_TEXTURE_SIZE * 4,
+                                                Vector2D{CODEX_CURSOR_TEXTURE_SIZE, CODEX_CURSOR_TEXTURE_SIZE}, true);
+    return g_codexCursorTexture;
 }
 
 void renderAgentIndicator(eRenderStage stage) {
-    if (stage != RENDER_LAST_MOMENT || !configBool("show_indicator", true) || !g_agentPointerPosition || !g_agentPointerUpdated || !g_pHyprOpenGL)
+    if (stage != RENDER_POST_WINDOW || !configBool("show_indicator", true) || !g_agentPointerPosition || !g_agentPointerUpdated || !g_pHyprOpenGL || !g_pHyprRenderer)
+        return;
+
+    const auto targetWindow = g_agentPointerWindow.lock();
+    const auto currentWindow = g_pHyprOpenGL->m_renderData.currentWindow.lock();
+    if (!targetWindow || currentWindow != targetWindow)
         return;
 
     const auto monitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
@@ -193,17 +252,17 @@ void renderAgentIndicator(eRenderStage stage) {
         return;
 
     const auto global = *g_agentPointerPosition;
-    if (global.x < monitor->m_position.x - 64.0 || global.y < monitor->m_position.y - 64.0 ||
-        global.x > monitor->m_position.x + monitor->m_size.x + 64.0 || global.y > monitor->m_position.y + monitor->m_size.y + 64.0)
+    const auto windowBox = targetWindow->getFullWindowBoundingBox();
+    if (global.x < windowBox.x || global.y < windowBox.y || global.x > windowBox.x + windowBox.w || global.y > windowBox.y + windowBox.h)
         return;
 
     const auto   now = Time::steadyNow();
     const double ageMs = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(now - *g_agentPointerUpdated).count());
-    const double timeoutMs = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(indicatorTimeout()).count());
-    if (ageMs > timeoutMs + 50.0)
+    const int    timeoutMs = indicatorTimeoutMs();
+    if (timeoutMs > 0 && ageMs > timeoutMs + 50.0)
         return;
 
-    const double fade = std::clamp((timeoutMs - ageMs) / 450.0, 0.0, 1.0);
+    const double fade = timeoutMs <= 0 ? 1.0 : std::clamp((static_cast<double>(timeoutMs) - ageMs) / 900.0, 0.0, 1.0);
     if (fade <= 0.0)
         return;
 
@@ -215,19 +274,17 @@ void renderAgentIndicator(eRenderStage stage) {
 
     const bool   clickLike = g_agentPointerAction == "click" || g_agentPointerAction == "doubleclick" || g_agentPointerAction == "double-click" ||
         g_agentPointerAction == "press" || g_agentPointerAction == "down" || g_agentPointerAction == "release" || g_agentPointerAction == "up";
-    const double pulse = std::clamp(1.0 - ageMs / (clickLike ? 420.0 : 620.0), 0.0, 1.0);
-    const double breathe = 0.5 + 0.5 * std::sin(ageMs / 165.0);
-    const Vector2D haloCenter = tip + Vector2D{12.0 * scale, 10.5 * scale};
-    const double outerDiameter = (35.0 + 8.0 * pulse + 2.0 * breathe) * scale;
-    const double innerDiameter = std::max(1.0, outerDiameter - 9.0 * scale);
+    const double pulse = clickLike ? std::clamp(1.0 - ageMs / 420.0, 0.0, 1.0) : 0.0;
+    const double renderSize = (CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse) * scale;
+    const double x = tip.x - (CODEX_CURSOR_HOTSPOT_X / CODEX_CURSOR_TEXTURE_SIZE) * renderSize;
+    const double y = tip.y - (CODEX_CURSOR_HOTSPOT_Y / CODEX_CURSOR_TEXTURE_SIZE) * renderSize;
 
-    addIndicatorCircle(haloCenter + Vector2D{1.8 * scale, 2.4 * scale}, outerDiameter + 1.5 * scale,
-                       CHyprColor(0.0F, 0.0F, 0.0F, static_cast<float>(0.18 * fade)));
-    addIndicatorCircle(haloCenter, outerDiameter + 2.0 * scale, CHyprColor(1.0F, 0.96F, 1.0F, static_cast<float>((0.24 + 0.16 * pulse) * fade)));
-    addIndicatorCircle(haloCenter, outerDiameter, CHyprColor(0.73F, 0.39F, 0.96F, static_cast<float>((0.38 + 0.22 * pulse) * fade)));
-    addIndicatorCircle(haloCenter, innerDiameter, CHyprColor(0.92F, 0.64F, 1.0F, static_cast<float>(0.20 * fade)));
-
-    renderCodexCursorBitmap(tip, scale, fade);
+    CTexPassElement::SRenderData data;
+    data.tex = codexCursorTexture();
+    data.box = CBox{x, y, renderSize, renderSize};
+    data.a = static_cast<float>(fade);
+    data.clipBox = windowBox.copy().translate(-monitor->m_position).scale(scale).round();
+    g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(std::move(data)));
 }
 
 void stopIndicatorTimer(SP<CEventLoopTimer>& timer) {
@@ -243,7 +300,10 @@ void scheduleIndicatorAnimation() {
     g_indicatorAnimationTimer = makeShared<CEventLoopTimer>(
         std::chrono::milliseconds(33),
         [](SP<CEventLoopTimer> self, void*) {
-            if (!g_agentPointerPosition || !g_pEventLoopManager) {
+            const auto now = Time::steadyNow();
+            const bool animationDone = g_agentPointerUpdated &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - *g_agentPointerUpdated).count() > 900;
+            if (!g_agentPointerPosition || !g_pEventLoopManager || animationDone) {
                 if (g_pEventLoopManager)
                     g_pEventLoopManager->removeTimer(self);
                 if (g_indicatorAnimationTimer.get() == self.get())
@@ -263,10 +323,14 @@ void scheduleIndicatorHide() {
         return;
 
     stopIndicatorTimer(g_indicatorHideTimer);
+    if (indicatorTimeoutMs() <= 0)
+        return;
+
     g_indicatorHideTimer = makeShared<CEventLoopTimer>(
         indicatorTimeout(),
         [](SP<CEventLoopTimer> self, void*) {
             damageAgentIndicator();
+            g_agentPointerWindow.reset();
             g_agentPointerPosition.reset();
             g_agentPointerUpdated.reset();
             g_agentPointerAction.clear();
@@ -281,11 +345,12 @@ void scheduleIndicatorHide() {
     g_pEventLoopManager->addTimer(g_indicatorHideTimer);
 }
 
-void showAgentIndicator(const Vector2D& globalPos, std::string_view action) {
+void showAgentIndicator(const PHLWINDOW& targetWindow, const Vector2D& globalPos, std::string_view action) {
     if (!configBool("show_indicator", true))
         return;
 
     damageAgentIndicator();
+    g_agentPointerWindow = PHLWINDOWREF{targetWindow};
     g_agentPointerPosition = globalPos;
     g_agentPointerUpdated = Time::steadyNow();
     g_agentPointerAction = std::string(action);
@@ -917,7 +982,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
 
     if (action == "move" || action == "motion") {
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -928,7 +993,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         if (!dx || !dy)
             return {.success = false, .error = "scroll dx/dy must be finite numbers"};
         sendPointerScroll(*dx, *dy);
-        showAgentIndicator(Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -937,7 +1002,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -948,7 +1013,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
             g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         }
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -956,7 +1021,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
     if (action == "press" || action == "down") {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -964,7 +1029,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
     if (action == "release" || action == "up") {
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -1156,7 +1221,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_screenshot", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_session", Hyprlang::INT{1});
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:show_indicator", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:indicator_timeout_ms", Hyprlang::INT{2600});
+    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:indicator_timeout_ms", Hyprlang::INT{12000});
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:keyboard", dispatchKeyboard);
@@ -1170,7 +1235,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.2.3",
+        .version = "0.2.4",
     };
 }
 
