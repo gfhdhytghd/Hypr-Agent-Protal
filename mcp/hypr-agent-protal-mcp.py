@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.5"
+SERVER_VERSION = "0.3.6"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -143,11 +143,12 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"], "description": "Compatibility scroll direction."},
         "scroll_amount": {"type": "number", "description": "Compatibility scroll tick amount."},
         "button": {"type": "string", "enum": ["left", "right", "middle", "side", "extra"], "default": "left"},
-        "key": {"type": "string", "description": "Key name for key actions, for example enter, escape, v, f5."},
+        "key": {"type": "string", "description": "Key name or shortcut for key actions, for example enter, escape, v, f5, alt+left."},
         "keycode": {"type": "integer", "description": "Raw evdev keycode for key actions, ydotool-style."},
         "keys": {"type": "string", "description": "Shortcut string for key actions, for example ctrl+v or alt+tab."},
         "modifiers": {"type": "string", "description": "Optional key modifiers, for example ctrl+shift."},
         "text": {"type": "string", "description": "Text for type/copy_text/paste_text actions."},
+        "name": {"type": "string", "description": "Accessible name/text to match for link or element clicking."},
         "show_cursor": {
             "type": "boolean",
             "description": "For screenshot debugging, draw the cursor indicator on the returned image. The real desktop indicator is rendered by the Hyprland plugin.",
@@ -261,6 +262,7 @@ def tool_definitions() -> list[dict[str, Any]]:
     point_props = {
         "app": app,
         "element_index": element_index,
+        "name": string_property("Accessible name/text to match before falling back to coordinates."),
         "coordinate": coordinate,
         "x": number_property("X coordinate in coordinate_space."),
         "y": number_property("Y coordinate in coordinate_space."),
@@ -276,18 +278,18 @@ def tool_definitions() -> list[dict[str, Any]]:
         {
             "name": "computer",
             "title": "hypr-agent-protal",
-            "description": "hypr-agent-protal compatibility tool for Hyprland background Computer Use. Prefer app plus get_app_state/screenshot coordinates; target/x/y global coordinates are only the low-level fallback. Do not use the obsolete hyprcum namespace.",
+            "description": "hypr-agent-protal compatibility tool for Hyprland background Computer Use, including browser/Chromium control through Hyprland. Prefer app plus get_app_state/screenshot coordinates; target/x/y global coordinates are only the low-level fallback. Do not use Browser MCP when the user explicitly asks for hypr-agent-protal. Do not use the obsolete hyprcum namespace.",
             "inputSchema": COMPUTER_SCHEMA,
         },
         {
             "name": "list_apps",
-            "description": "List running Hyprland apps/windows available to hypr-agent-protal. Start here before choosing a target app. If the desired app is missing, call launch_app/open_app.",
+            "description": "List running Hyprland apps/windows available to hypr-agent-protal. Start here before choosing a target app. If the user asks for a new app/window, call launch_app/open_app instead of reusing an existing app.",
             "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema({}),
         },
         {
             "name": "launch_app",
-            "description": "Launch an app through Hyprland and return the matching window selector. Use this when list_apps does not show the app the user asked to operate. For Chromium/Chrome, url/new_window launches a new accessible browser window.",
+            "description": "Launch an app through Hyprland and return the matching window selector. Use this when the user asks to open/launch a new app/window, even if another instance already exists. For browser tasks, launch Chromium/Chrome with url/new_window here instead of Browser MCP.",
             "annotations": LAUNCH_ANNOTATIONS,
             "inputSchema": launch_schema,
         },
@@ -341,7 +343,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "click",
-            "description": "Click an element by index or screenshot/window-relative coordinates.",
+            "description": "Click a visible element by index, accessible name/text, or screenshot/window-relative coordinates. Element clicks use the native pointer path so the visible agent cursor overlay appears.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema(
                 {
@@ -461,18 +463,31 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "press_key",
-            "description": "Press a key or key-combination, using xdotool-style syntax such as ctrl+v, Return, or super+c.",
-            "annotations": ACTION_ANNOTATIONS,
-            "inputSchema": object_schema({"app": app, "key": string_property("Key or key-combination to press.")}, ["app", "key"]),
-        },
-        {
-            "name": "key",
-            "description": "Compatibility alias for press_key. Accepts key or text.",
+            "description": "Press a key or key-combination, using xdotool-style syntax such as ctrl+v, Return, alt+left, or super+c.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema(
                 {
                     "app": app,
                     "key": string_property("Key or key-combination to press."),
+                    "keys": string_property("Compatibility shortcut string, for example alt+left."),
+                    "modifiers": string_property("Optional modifiers when key is a bare key, for example alt."),
+                    "keycode": integer_property("Raw evdev keycode, ydotool-style."),
+                    "repeat": integer_property("Number of times to repeat the key. Defaults to 1."),
+                },
+                ["app"],
+            ),
+        },
+        {
+            "name": "key",
+            "description": "Compatibility alias for press_key. Accepts key, keys, modifiers, keycode, or text.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "key": string_property("Key or key-combination to press."),
+                    "keys": string_property("Compatibility shortcut string, for example alt+left."),
+                    "modifiers": string_property("Optional modifiers when key is a bare key, for example alt."),
+                    "keycode": integer_property("Raw evdev keycode, ydotool-style."),
                     "text": string_property("Compatibility key text."),
                     "repeat": integer_property("Number of times to repeat the key. Defaults to 1."),
                 },
@@ -1012,10 +1027,103 @@ def element_center(element: dict[str, Any]) -> tuple[float, float]:
     return float(frame.get("x") or 0.0) + float(frame.get("width") or 0.0) / 2.0, float(frame.get("y") or 0.0) + float(frame.get("height") or 0.0) / 2.0
 
 
+def screenshot_size(snapshot: dict[str, Any]) -> tuple[float, float]:
+    screenshot = snapshot.get("screenshot") or {}
+    return float(screenshot.get("width") or 0.0), float(screenshot.get("height") or 0.0)
+
+
+def frame_intersection(frame: dict[str, Any], width: float, height: float) -> dict[str, float] | None:
+    x = float(frame.get("x") or 0.0)
+    y = float(frame.get("y") or 0.0)
+    w = float(frame.get("width") or 0.0)
+    h = float(frame.get("height") or 0.0)
+    if w <= 0 or h <= 0 or width <= 0 or height <= 0:
+        return None
+    left = max(0.0, x)
+    top = max(0.0, y)
+    right = min(width, x + w)
+    bottom = min(height, y + h)
+    if right <= left or bottom <= top:
+        return None
+    return {"x": left, "y": top, "width": right - left, "height": bottom - top}
+
+
+def element_visible_rect(snapshot: dict[str, Any], element: dict[str, Any]) -> dict[str, float] | None:
+    frame = element.get("frame")
+    if not isinstance(frame, dict):
+        return None
+    width, height = screenshot_size(snapshot)
+    return frame_intersection(frame, width, height)
+
+
+def element_is_visible(snapshot: dict[str, Any], element: dict[str, Any]) -> bool:
+    return element_visible_rect(snapshot, element) is not None
+
+
+def visible_element_center(snapshot: dict[str, Any], element: dict[str, Any]) -> tuple[float, float]:
+    rect = element_visible_rect(snapshot, element)
+    if rect is None:
+        raise RuntimeError("element is outside the current screenshot; scroll to it or choose a visible element")
+    return rect["x"] + rect["width"] / 2.0, rect["y"] + rect["height"] / 2.0
+
+
+def element_text(element: dict[str, Any]) -> str:
+    parts = [
+        str(element.get("name") or ""),
+        str(element.get("value") or ""),
+        str(element.get("automationId") or ""),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def element_role(element: dict[str, Any]) -> str:
+    return normalize(element.get("localizedControlType") or element.get("controlType") or "")
+
+
+def element_matches_text(element: dict[str, Any], needle: str) -> bool:
+    return normalize(needle) in normalize(element_text(element))
+
+
+def find_element_by_text(snapshot: dict[str, Any], text: str, *, role: str | None = None, nth: int = 1, visible_only: bool = True) -> dict[str, Any]:
+    matches = []
+    role_norm = normalize(role) if role else ""
+    for element in snapshot.get("elements") or []:
+        if role_norm and element_role(element) != role_norm:
+            continue
+        if not element_matches_text(element, text):
+            continue
+        if visible_only and not element_is_visible(snapshot, element):
+            continue
+        matches.append(dict(element))
+    matches.sort(key=lambda item: (float((element_visible_rect(snapshot, item) or {}).get("y") or 0.0), float((element_visible_rect(snapshot, item) or {}).get("x") or 0.0)))
+    if nth < 1:
+        nth = 1
+    if len(matches) < nth:
+        raise RuntimeError(f'no visible element matching "{text}"')
+    return matches[nth - 1]
+
+
+def control_overlay(snapshot: dict[str, Any], x: float | None = None, y: float | None = None, *, coordinate_space: Any = "screenshot", action: str = "move") -> dict[str, Any] | None:
+    try:
+        if x is None or y is None:
+            width, height = screenshot_size(snapshot)
+            x = width / 2.0
+            y = height / 2.0
+            coordinate_space = "screenshot"
+        global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
+        return call_ctl(["indicator", "--json", str(snapshot["target"]), str(global_x), str(global_y), str(action or "move")])
+    except Exception:
+        return None
+
+
 def action_point(snapshot: dict[str, Any], args: dict[str, Any], *, default_center: bool = False) -> tuple[float, float]:
     element_index = args.get("element_index")
     if isinstance(element_index, str) and element_index:
-        return element_center(lookup_element(snapshot, element_index))
+        return visible_element_center(snapshot, lookup_element(snapshot, element_index))
+
+    name = args.get("name") or args.get("text")
+    if isinstance(name, str) and name:
+        return visible_element_center(snapshot, find_element_by_text(snapshot, name))
 
     point = point_from_args(args)
     if point is not None:
@@ -1914,7 +2022,7 @@ def key_from_args(args: dict[str, Any]) -> tuple[str, str]:
             raise RuntimeError("empty keys shortcut")
         return parts[-1], "+".join(parts[:-1])
 
-    key = args.get("key")
+    key = args.get("key") or args.get("text")
     if not isinstance(key, str) or not key:
         raise RuntimeError("key action requires key or keys")
     modifiers = args.get("modifiers") if isinstance(args.get("modifiers"), str) else ""
@@ -2189,11 +2297,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
     element_index = args.get("element_index")
     if isinstance(element_index, str) and element_index:
         element = lookup_element(snapshot, element_index)
-        if button == "left" and element.get("source") == "atspi":
-            if atspi_do_action_isolated(snapshot, element):
-                refreshed = build_app_snapshot(app)
-                return mcp_snapshot_result(refreshed)
-        x, y = element_center(element)
+        x, y = visible_element_center(snapshot, element)
         coordinate_space = "screenshot"
     else:
         point = action_point(snapshot, args)
@@ -2220,6 +2324,11 @@ def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
     action = str(args.get("action") or "")
     if not action:
         raise RuntimeError("Missing required argument: action")
+    try:
+        x, y = visible_element_center(snapshot, element)
+        control_overlay(snapshot, x, y, action=action)
+    except Exception:
+        control_overlay(snapshot, action=action)
     if not atspi_do_action_isolated(snapshot, element, action):
         raise RuntimeError(f"{action} is not a valid secondary action for element")
     return mcp_snapshot_result(build_app_snapshot(app))
@@ -2287,6 +2396,7 @@ def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(text, str) or not text:
         raise RuntimeError("Missing required argument: text")
     snapshot = current_snapshot(app)
+    control_overlay(snapshot, action="type")
     if atspi_insert_text_isolated(snapshot, text):
         return mcp_snapshot_result(build_app_snapshot(app))
     type_text(str(snapshot["target"]), text, {"method": "auto"})
@@ -2295,18 +2405,17 @@ def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
 
 def semantic_press_key(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
-    key = args.get("key") or args.get("text")
-    if not isinstance(key, str) or not key:
-        raise RuntimeError("Missing required argument: key")
     snapshot = current_snapshot(app)
-    parts = [part for part in key.replace("-", "+").split("+") if part]
-    if not parts:
-        raise RuntimeError("Missing required argument: key")
+    key, modifiers = key_from_args(args)
+    control_overlay(snapshot, action="key")
     repeat = args.get("repeat", 1)
     if not isinstance(repeat, int) or repeat < 1:
         repeat = 1
+    info: dict[str, Any] = {}
     for _ in range(min(repeat, 100)):
-        keyboard(str(snapshot["target"]), parts[-1], "+".join(parts[:-1]))
+        info = keyboard(str(snapshot["target"]), key, modifiers)
+    if info:
+        info["repeat"] = min(repeat, 100)
     return mcp_snapshot_result(build_app_snapshot(app))
 
 
@@ -2317,6 +2426,11 @@ def semantic_set_value(args: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("Missing required argument: value")
     snapshot = current_snapshot(app)
     element = lookup_element(snapshot, str(args.get("element_index") or ""))
+    try:
+        x, y = visible_element_center(snapshot, element)
+        control_overlay(snapshot, x, y, action="set_value")
+    except Exception:
+        control_overlay(snapshot, action="set_value")
     if not atspi_set_element_value_isolated(snapshot, element, value):
         raise RuntimeError("Cannot set a value for an element that is not settable")
     return mcp_snapshot_result(build_app_snapshot(app))

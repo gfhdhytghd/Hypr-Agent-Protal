@@ -361,6 +361,20 @@ def pointer(args: argparse.Namespace) -> int:
     return 0
 
 
+def indicator(args: argparse.Namespace) -> int:
+    payload = ",".join([args.target, str(args.x), str(args.y), args.action])
+    result = dispatch(args.dispatcher, payload)
+    if result.returncode != 0:
+        print(result.stderr or result.stdout, file=sys.stderr, end="")
+        return result.returncode or 1
+    write_agent_cursor(cursor_state_path(), target=args.target, x=args.x, y=args.y, action=args.action, button="left")
+    if args.json:
+        print(json.dumps({"ok": True, "target": args.target, "x": args.x, "y": args.y, "action": args.action}))
+    else:
+        print(result.stdout, end="")
+    return 0
+
+
 def keyboard(args: argparse.Namespace) -> int:
     parts = [args.target, args.action, args.key, args.modifiers or ""]
     if args.x is not None or args.y is not None:
@@ -373,6 +387,8 @@ def keyboard(args: argparse.Namespace) -> int:
     if result.returncode != 0:
         print(result.stderr or result.stdout, file=sys.stderr, end="")
         return result.returncode or 1
+    if args.x is not None and args.y is not None:
+        write_agent_cursor(cursor_state_path(), target=args.target, x=args.x, y=args.y, action="key", button="left")
     if args.json:
         print(json.dumps({"ok": True, "target": args.target, "action": args.action, "key": args.key, "modifiers": args.modifiers or ""}))
     else:
@@ -500,6 +516,15 @@ def build_parser() -> argparse.ArgumentParser:
     ptr.add_argument("--dispatcher", default="hypr-agent-protal:pointer")
     ptr.add_argument("--json", action="store_true")
     ptr.set_defaults(func=pointer)
+
+    ind = sub.add_parser("indicator", help="show the agent cursor indicator without sending input")
+    ind.add_argument("target", help="Hyprland window regex, for example address:0x1234")
+    ind.add_argument("x", type=float, help="global logical x coordinate")
+    ind.add_argument("y", type=float, help="global logical y coordinate")
+    ind.add_argument("action", nargs="?", default="move", help="action label for cursor animation state")
+    ind.add_argument("--dispatcher", default="hypr-agent-protal:indicator")
+    ind.add_argument("--json", action="store_true")
+    ind.set_defaults(func=indicator)
 
     key = sub.add_parser("keyboard", help="send keyboard input to a target window")
     key.add_argument("target", help="Hyprland window regex, for example address:0x1234")

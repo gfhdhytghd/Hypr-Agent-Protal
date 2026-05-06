@@ -1,7 +1,7 @@
 {
   "name": "hypr-agent-protal",
-  "version": "0.3.5",
-  "description": "hypr-agent-protal MCP only. Hyprland background screenshot, input, clipboard, and app-state bridge. Do not use the obsolete hyprcum server.",
+  "version": "0.3.6",
+  "description": "hypr-agent-protal MCP only. Hyprland background screenshot, input, clipboard, browser/Chromium control, app-state, and visible agent cursor bridge. Do not use Browser MCP when the user explicitly asks for hypr-agent-protal. Do not use the obsolete hyprcum server.",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "hypr-agent-protal",
@@ -9,6 +9,6 @@
     "developerName": "wilf",
     "category": "Developer Tools",
     "capabilities": ["mcp", "computer-use"],
-    "defaultPrompt": "Use only the hypr-agent-protal MCP server/namespace; hyprcum is the obsolete pre-rename server and should not be used. Start with list_apps. If the requested app is missing, call launch_app/open_app instead of using a shell. Then call get_app_state or screenshot with app. Prefer element_index or screenshot/window-relative coordinates. Use global target/x/y only as a low-level computer fallback."
+    "defaultPrompt": "Use only the hypr-agent-protal MCP server/namespace; do not use Browser MCP when the user explicitly asks for hypr-agent-protal, and do not use obsolete hyprcum. If the user asks to open/launch a new app/window, call launch_app/open_app first even if an existing app is running. For Chromium/Chrome browser tasks use launch_app with app=chromium, url, and new_window=true. Then call get_app_state or screenshot with app. Prefer element_index or screenshot/window-relative coordinates. Use global target/x/y only as a low-level computer fallback. Shortcut inputs may be key, keys, modifiers, or keycode. Do not use app-specific heuristics; refresh app state and act on visible current elements."
   }
 }

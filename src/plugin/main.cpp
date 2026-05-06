@@ -1487,6 +1487,30 @@ SDispatchResult dispatchPointer(const std::string& args) {
     return {.success = false, .error = "unknown pointer action"};
 }
 
+SDispatchResult dispatchIndicator(const std::string& args) {
+    if (!g_pCompositor)
+        return {.success = false, .error = "compositor is not ready"};
+
+    const auto parts = splitCsv(args);
+    if (parts.size() < 3)
+        return {.success = false, .error = "usage: hypr-agent-protal:indicator <window-regex>,<global-x>,<global-y>[,<action>]"};
+
+    const auto x = parseDouble(parts[1]);
+    const auto y = parseDouble(parts[2]);
+    if (!x || !y)
+        return {.success = false, .error = "indicator coordinates must be finite numbers"};
+
+    auto window = g_pCompositor->getWindowByRegex(parts[0]);
+    if (!window || !window->m_isMapped)
+        return {.success = false, .error = "target window not found"};
+
+    const Vector2D global{*x, *y};
+    window = xwaylandRelatedWindowAt(window, global);
+    const auto action = parts.size() >= 4 ? lower(parts[3]) : std::string{"move"};
+    showAgentIndicator(window, global, action);
+    return {.success = true};
+}
+
 SDispatchResult dispatchKeyboard(const std::string& args) {
     if (!configBool("allow_keyboard", true))
         return {.success = false, .error = "hypr-agent-protal keyboard dispatch is disabled"};
@@ -1498,11 +1522,13 @@ SDispatchResult dispatchKeyboard(const std::string& args) {
         return {.success = false, .error = "usage: hypr-agent-protal:keyboard <window-regex>,<tap|press|release>,<key>[,<modifiers>][,<global-x>,<global-y>]"};
 
     std::optional<TargetSurface> target;
+    std::optional<Vector2D>      indicatorGlobal;
     if (parts.size() >= 6) {
         const auto x = parseDouble(parts[4]);
         const auto y = parseDouble(parts[5]);
         if (!x || !y)
             return {.success = false, .error = "keyboard focus coordinates must be finite numbers"};
+        indicatorGlobal = Vector2D{*x, *y};
         target = resolveTargetSurface(parts[0], Vector2D{*x, *y});
     } else {
         target = resolveTargetMainSurface(parts[0]);
@@ -1529,6 +1555,7 @@ SDispatchResult dispatchKeyboard(const std::string& args) {
 
     KeyboardFocusRestore restore;
     activateXWaylandTarget(*target);
+    showAgentIndicator(target->window, indicatorGlobal.value_or(windowMainSurfaceGoalBox(target->window).middle()), "key");
     g_pSeatManager->setKeyboardFocus(target->surface);
 
     const auto pressModifiers = [&] {
@@ -1675,6 +1702,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:cursor_texture_path", Hyprlang::STRING{""});
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
+    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:indicator", dispatchIndicator);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:keyboard", dispatchKeyboard);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:screenshot", dispatchScreenshot);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:session", dispatchSession);
@@ -1684,9 +1712,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     return {
         .name = "hypr-agent-protal",
-        .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
+        .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.5",
+        .version = "0.3.6",
     };
 }
 

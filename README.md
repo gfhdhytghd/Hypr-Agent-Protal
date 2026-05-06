@@ -7,13 +7,14 @@ the `hypr-agent-protal` MCP server/namespace and Hyprland dispatchers. If both
 `mcp__hypr_agent_protal__` and `mcp__hyprcum__` are visible, the Codex
 configuration is stale; disable or remove the old `hyprcum` plugin/server.
 
-It exposes four compositor dispatchers:
+It exposes five compositor dispatchers:
 
 ```ini
 hyprctl dispatch hypr-agent-protal:screenshot /tmp/hypr-agent-protal-session.json
 hyprctl dispatch hypr-agent-protal:screenshot '/tmp/hypr-agent-protal-session.json,address:0x1234'
 hyprctl dispatch hypr-agent-protal:pointer 'address:0x1234,930,520,click,left'
 hyprctl dispatch hypr-agent-protal:pointer 'address:0x1234,930,520,drag,left,1180,760,0.2'
+hyprctl dispatch hypr-agent-protal:indicator 'address:0x1234,930,520,type'
 hyprctl dispatch hypr-agent-protal:keyboard 'address:0x1234,tap,v,ctrl'
 hyprctl dispatch hypr-agent-protal:session 'begin,address:0x1234'
 ```
@@ -51,17 +52,22 @@ python3 mcp/hypr-agent-protal-mcp.py
 
 Recommended agent workflow:
 
-1. Call `list_apps` first and select the target app/window.
-2. If the requested app is not in `list_apps`, call `launch_app` or `open_app`.
+1. If the user explicitly asks for `hypr-agent-protal`, do not use Browser MCP
+   or the old `hyprcum` namespace.
+2. If the user asks to open, launch, or create a new app/window, call
+   `launch_app` or `open_app` first, even when another instance is already
+   running.
+3. Otherwise call `list_apps` first and select the target app/window.
+4. If the requested app is not in `list_apps`, call `launch_app` or `open_app`.
    Do not guess a shell command outside the MCP tool. The launcher uses
    `hyprctl dispatch exec`, waits for the Hyprland window, and returns a
    `target` selector plus the next `get_app_state` hint.
-3. Call `get_app_state` for semantic state, or `screenshot` with `app` for an
+5. Call `get_app_state` for semantic state, or `screenshot` with `app` for an
    image-only refresh.
-4. Prefer `element_index` from `get_app_state`. When coordinates are needed,
+6. Prefer `element_index` from `get_app_state`. When coordinates are needed,
    use `coordinate_space=screenshot` with screenshot pixels, or
    `coordinate_space=window` with target-window-relative logical coordinates.
-5. Use `computer` with `target` and global `x/y` only as a low-level fallback.
+7. Use `computer` with `target` and global `x/y` only as a low-level fallback.
 
 Apps launched through `launch_app`/`open_app` automatically get accessibility
 environment variables:
@@ -78,8 +84,20 @@ Chromium/Chrome/Electron-like launches also get
 directly, use for example:
 
 ```json
-{"app": "chromium", "url": "https://google.com", "new_window": true}
+{"app": "chromium", "url": "https://example.com", "new_window": true}
 ```
+
+For browser or app-control tasks, the intended sequence is `launch_app`,
+`get_app_state`, then element-index actions where possible. Refresh
+`get_app_state` after navigation or major UI changes, and use screenshot/window
+coordinates only when the accessibility tree is missing or ambiguous.
+
+The visible agent cursor is a compositor-side indicator, not a side effect of
+moving the real pointer. Pointer actions update it through
+`hypr-agent-protal:pointer`; semantic AT-SPI, keyboard, and text actions update
+the same indicator through `hypr-agent-protal:indicator` before acting, so users
+can see which app/region the agent is controlling regardless of the input
+backend.
 
 Avoid the obsolete `hyprcum` MCP server and namespace. Its tool schema lacks the
 new app-state, screenshot-relative coordinates, related-window session handling,
@@ -127,10 +145,10 @@ The compatibility `computer` tool still exposes these lower-level actions:
 - `move`, `click`, `doubleclick`, `press`, `release`: sends pointer input to a target window selector such as `address:0x1234`.
 - `scroll`: sends wheel axis events to a target window.
 - `drag`: presses, moves, and releases on the target window through the native pointer dispatcher.
-- `key`: sends a shortcut such as `ctrl+v`, `enter`, or `escape` to a target window. It also accepts raw evdev keycodes through `keycode` for ydotool-style fallback.
+- `key`: sends a shortcut such as `ctrl+v`, `enter`, `alt+left`, or `escape` to a target window. It accepts `key`, `keys`, `modifiers`, and raw evdev `keycode` for ydotool-style fallback.
 - `type`: sends text to the target input. Use `method` values `auto`, `keys`, or `paste`; by default it types short ASCII text as key events and uses clipboard paste for Unicode or longer text.
 - `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
-- Text paste actions prefer same-process XWayland popup windows, such as WeChat search results, and restore the previous text clipboard after paste when possible.
+- Text paste actions prefer same-process XWayland popup windows and restore the previous text clipboard after paste when possible.
 - `copy_text`: writes text to the clipboard without sending input.
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
@@ -149,6 +167,7 @@ scripts/hypr-agent-protalctl windows --related-to 'address:0x1234'
 scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 click left
 scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 scroll -3
 scripts/hypr-agent-protalctl pointer 'address:0x1234' 930 520 drag left 1180 760 --duration 0.2
+scripts/hypr-agent-protalctl indicator 'address:0x1234' 930 520 type
 scripts/hypr-agent-protalctl keyboard 'address:0x1234' tap v ctrl
 scripts/hypr-agent-protalctl keyboard 'address:0x1234' tap 28
 scripts/hypr-agent-protalctl session begin 'address:0x1234'
