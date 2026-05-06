@@ -503,6 +503,9 @@ def windows(args: argparse.Namespace) -> int:
         return result.returncode or 1
 
     clients = json.loads(result.stdout or "[]")
+    for index, client in enumerate(clients):
+        if isinstance(client, dict):
+            client["hyprAgentProtalStackIndex"] = index
     related_to = None
     if args.related_to:
         related_to = next((client for client in clients if selector_matches(client, args.related_to)), None)

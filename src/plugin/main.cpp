@@ -1009,8 +1009,8 @@ PHLWORKSPACE workspaceSessionTarget(const WorkspaceSession& session) {
     return session.targetWorkspace;
 }
 
-bool workspaceSessionMatchesWindow(const WorkspaceSession& session, const PHLWINDOW& window) {
-    if (!window || !window->m_isMapped)
+bool workspaceSessionMatchesWindow(const WorkspaceSession& session, const PHLWINDOW& window, bool requireMapped = true) {
+    if (!window || (requireMapped && !window->m_isMapped))
         return false;
 
     const auto root = session.root.lock();
@@ -1045,13 +1045,26 @@ void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window
     const auto moved = *windowIt;
     windows.erase(windowIt);
 
-    auto rootIt = std::find(windows.begin(), windows.end(), root);
-    if (rootIt == windows.end()) {
-        windows.push_back(moved);
-        return;
+    auto insertionIt = windows.end();
+    if (window->m_isFloating && window->m_workspace) {
+        insertionIt = std::find_if(windows.begin(), windows.end(), [&root, &window](const auto& candidate) {
+            if (!candidate || candidate == root || candidate == window || !candidate->m_isMapped || candidate->isHidden() || !candidate->m_isFloating)
+                return false;
+            if (candidate->m_workspace != window->m_workspace)
+                return false;
+            return !sameClientFamily(root, candidate);
+        });
     }
 
-    windows.insert(std::next(rootIt), moved);
+    if (insertionIt != windows.end()) {
+        windows.insert(insertionIt, moved);
+    } else {
+        auto rootIt = std::find(windows.begin(), windows.end(), root);
+        if (rootIt == windows.end())
+            windows.push_back(moved);
+        else
+            windows.insert(std::next(rootIt), moved);
+    }
 
     if (g_pHyprRenderer) {
         g_pHyprRenderer->damageWindow(root);
@@ -1060,7 +1073,7 @@ void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window
 }
 
 void placeRelatedWindowOnRootWorkspaceEarly(WorkspaceSession& session, const PHLWINDOW& window) {
-    if (!window || !window->m_isMapped)
+    if (!window)
         return;
 
     const auto root = session.root.lock();
@@ -1068,6 +1081,8 @@ void placeRelatedWindowOnRootWorkspaceEarly(WorkspaceSession& session, const PHL
         return;
 
     constrainRelatedWindowFocusAndLayer(window);
+    if (!window->m_isMapped)
+        return;
 
     const auto targetWorkspace = workspaceSessionTarget(session);
     if (!targetWorkspace || targetWorkspace->inert() || window->m_workspace == targetWorkspace)
@@ -1077,14 +1092,14 @@ void placeRelatedWindowOnRootWorkspaceEarly(WorkspaceSession& session, const PHL
     window->m_monitor = targetWorkspace->m_monitor;
 }
 
-void scheduleRelatedWindowRestack(const PHLWINDOW& root, const PHLWINDOW& window) {
+void scheduleRelatedWindowRestack(const PHLWINDOW& root, const PHLWINDOW& window, std::chrono::milliseconds delay) {
     if (!g_pEventLoopManager || !root || !window || root == window)
         return;
 
     PHLWINDOWREF rootRef{root};
     PHLWINDOWREF windowRef{window};
     auto         timer = makeShared<CEventLoopTimer>(
-        std::chrono::milliseconds(75),
+        delay,
         [rootRef, windowRef](SP<CEventLoopTimer> self, void*) mutable {
             restackRelatedWindowWithRoot(rootRef.lock(), windowRef.lock());
 
@@ -1099,6 +1114,12 @@ void scheduleRelatedWindowRestack(const PHLWINDOW& root, const PHLWINDOW& window
 
     g_workspaceRestackTimers.push_back(timer);
     g_pEventLoopManager->addTimer(timer);
+}
+
+void scheduleRelatedWindowRestacks(const PHLWINDOW& root, const PHLWINDOW& window) {
+    scheduleRelatedWindowRestack(root, window, std::chrono::milliseconds(50));
+    scheduleRelatedWindowRestack(root, window, std::chrono::milliseconds(200));
+    scheduleRelatedWindowRestack(root, window, std::chrono::milliseconds(500));
 }
 
 void moveRelatedWindowToSessionWorkspace(WorkspaceSession& session, const PHLWINDOW& window) {
@@ -1118,7 +1139,7 @@ void moveRelatedWindowToSessionWorkspace(WorkspaceSession& session, const PHLWIN
 
     if (root) {
         restackRelatedWindowWithRoot(root, window);
-        scheduleRelatedWindowRestack(root, window);
+        scheduleRelatedWindowRestacks(root, window);
     }
 }
 
@@ -1147,7 +1168,7 @@ void handleWorkspaceSessionWindowOpenEarly(const PHLWINDOW& window) {
         return;
 
     for (auto& session : g_workspaceSessions) {
-        if (workspaceSessionMatchesWindow(session, window))
+        if (workspaceSessionMatchesWindow(session, window, false))
             placeRelatedWindowOnRootWorkspaceEarly(session, window);
     }
 }
@@ -1814,7 +1835,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.40",
+        .version = "0.3.41",
     };
 }
 
