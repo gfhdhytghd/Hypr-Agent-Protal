@@ -165,6 +165,14 @@ def main() -> int:
     assert all(item["index"] != 4 for item in hints["visibleTabs"])
     assert hints["visibleToolbars"][0]["index"] == 3
     assert "can be a classic menu" in hints["notes"][0]
+    form_hints = mcp.ui_hints_for_elements(
+        {"screenshot": {"width": 500, "height": 360}},
+        [
+            {"index": 1, "source": "atspi", "controlType": "radio button", "name": "Option", "frame": {"x": 10, "y": 10, "width": 60, "height": 20}},
+            {"index": 2, "source": "atspi", "controlType": "push button", "name": "OK", "frame": {"x": 10, "y": 40, "width": 60, "height": 20}},
+        ],
+    )
+    assert any("verify the visible form values" in note for note in form_hints["notes"])
     action_hints = mcp.ui_hints_for_elements(
         hints_snapshot,
         [

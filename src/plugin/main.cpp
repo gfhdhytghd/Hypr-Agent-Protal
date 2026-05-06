@@ -1021,9 +1021,21 @@ bool workspaceSessionMatchesWindow(const WorkspaceSession& session, const PHLWIN
     return session.pid > 0 && window->getPID() == session.pid;
 }
 
+void constrainRelatedWindowFocusAndLayer(const PHLWINDOW& window) {
+    if (!window)
+        return;
+
+    window->m_noInitialFocus = true;
+    window->m_createdOverFullscreen = false;
+    window->m_suppressedEvents |= Desktop::View::SUPPRESS_ACTIVATE | Desktop::View::SUPPRESS_ACTIVATE_FOCUSONLY;
+    window->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
+}
+
 void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window) {
     if (!g_pCompositor || !root || !window || root == window)
         return;
+
+    constrainRelatedWindowFocusAndLayer(window);
 
     auto& windows = g_pCompositor->m_windows;
     auto  windowIt = std::find(windows.begin(), windows.end(), window);
@@ -1055,13 +1067,12 @@ void placeRelatedWindowOnRootWorkspaceEarly(WorkspaceSession& session, const PHL
     if (!root || root == window)
         return;
 
+    constrainRelatedWindowFocusAndLayer(window);
+
     const auto targetWorkspace = workspaceSessionTarget(session);
     if (!targetWorkspace || targetWorkspace->inert() || window->m_workspace == targetWorkspace)
         return;
 
-    window->m_noInitialFocus = true;
-    window->m_suppressedEvents |= Desktop::View::SUPPRESS_ACTIVATE | Desktop::View::SUPPRESS_ACTIVATE_FOCUSONLY;
-    window->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
     window->moveToWorkspace(targetWorkspace);
     window->m_monitor = targetWorkspace->m_monitor;
 }
@@ -1803,7 +1814,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.34",
+        .version = "0.3.35",
     };
 }
 

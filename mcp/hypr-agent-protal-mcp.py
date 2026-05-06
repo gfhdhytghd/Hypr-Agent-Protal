@@ -2580,6 +2580,20 @@ def ui_hints_for_elements(snapshot: dict[str, Any], elements: list[dict[str, Any
         if len(hints[key]) > 24:
             hints[key] = hints[key][:24]
             hints[f"{key}Truncated"] = True
+    has_form_control = any(
+        element_role(element) in {"radio button", "check box", "combo box", "text", "entry", "spin button", "slider", "table cell", "list item", "tree item"}
+        for element in elements
+        if isinstance(element, dict)
+    )
+    has_confirm_action = any(
+        normalize(element.get("name") or element.get("value") or "") in {"ok", "apply", "confirm", "finish", "submit", "确定", "应用", "确认", "完成", "提交"}
+        for element in elements
+        if isinstance(element, dict) and element_role_is_actionable(element_role(element))
+    )
+    if has_form_control and has_confirm_action:
+        hints["notes"].append(
+            "Before activating a confirm/apply/submit/finish button, refresh or inspect the current app state and verify the visible form values/selections match the requested result."
+        )
     return hints
 
 
