@@ -67,12 +67,16 @@ Recommended agent workflow:
 6. Prefer `element_index` from `get_app_state`. When coordinates are needed,
    use `coordinate_space=screenshot` with screenshot pixels, or
    `coordinate_space=window` with target-window-relative logical coordinates.
-7. Read `uiHints` before acting on menus, tabs, or toolbars. `controlType=menu`
+7. Use `paste_text` for multiline, tabular, CSV/TSV, Unicode-heavy, or long
+   text. Do not enter datasets with repeated `type_text`/`key` calls unless
+   paste is unavailable. For grid-like targets, bulk paste first exits cell
+   edit mode so TSV/CSV expands into cells instead of becoming one cell's text.
+8. Read `uiHints` before acting on menus, tabs, or toolbars. `controlType=menu`
    is an AT-SPI menu entry reported by the toolkit; it is not a tab/ribbon page
    even when the visible label matches. If a visible tab/ribbon label is not
    exposed as a tab element, click that visible label using screenshot/window
    coordinates and refresh `get_app_state`.
-8. If using the compatibility `computer` tool, pass `app` when possible. When
+9. If using the compatibility `computer` tool, pass `app` when possible. When
    only `target` is available, `coordinate_space=screenshot` and
    `coordinate_space=window` still use target-relative coordinates; use
    `coordinate_space=global` only for deliberate low-level fallback.
@@ -117,7 +121,7 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 - `launch_app` / `open_app`: starts apps through Hyprland, applies accessibility environment/flags, waits for a new window, and returns its selector.
 - `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree plus `uiHints` for menus, tabs, and toolbars. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback. AT-SPI frames are normalized to screenshot pixels, including target-window captures that contain compositor shadow/border margins.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
-- `click`, `scroll`, `drag`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers.
+- `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
 
 The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch. Compatibility calls that provide `target` instead of `app` use the same target-relative conversion unless `coordinate_space=global` is explicit.
@@ -163,7 +167,7 @@ The compatibility `computer` tool still exposes these lower-level actions:
 - `scroll`: sends wheel axis events to a target window.
 - `drag`: presses, moves, and releases on the target window through the native pointer dispatcher; screenshot/window coordinate spaces are converted relative to that target.
 - `key`: sends a shortcut such as `ctrl+v`, `enter`, `alt+left`, or `escape` to a target window. It accepts `key`, `keys`, `modifiers`, and raw evdev `keycode` for ydotool-style fallback.
-- `type`: sends text to the target input. Use `method` values `auto`, `keys`, or `paste`; by default it types short ASCII text as key events and uses clipboard paste for Unicode or longer text.
+- `type`: sends short text to the target input. Use `method` values `auto`, `keys`, `paste`, or `atspi`; by default it uses background key/paste input. Prefer `paste_text` for datasets, multiline text, CSV/TSV, or anything long.
 - `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
 - Text paste actions prefer same-process related popup/dialog windows, keep the target session active while a related dialog is open, and restore the previous text clipboard after paste when possible.
 - `copy_text`: writes text to the clipboard without sending input.

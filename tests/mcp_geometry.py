@@ -135,12 +135,17 @@ def main() -> int:
             {"index": 1, "source": "atspi", "controlType": "menu", "name": "Insert", "frame": {"x": 100.0, "y": 0.0, "width": 80.0, "height": 36.0}},
             {"index": 2, "source": "atspi", "controlType": "page tab", "name": "Insert", "frame": {"x": 200.0, "y": 0.0, "width": 90.0, "height": 36.0}},
             {"index": 3, "source": "atspi", "controlType": "tool bar", "name": "Formatting", "frame": {"x": 0.0, "y": 40.0, "width": 1000.0, "height": 80.0}},
+            {"index": 4, "source": "atspi", "controlType": "table", "name": "Sheet", "frame": {"x": 0.0, "y": 120.0, "width": 1000.0, "height": 400.0}},
         ],
     )
     assert hints["visibleMenus"][0]["index"] == 1
     assert hints["visibleTabs"][0]["index"] == 2
+    assert all(item["index"] != 4 for item in hints["visibleTabs"])
     assert hints["visibleToolbars"][0]["index"] == 3
     assert "not the same as a tab" in hints["notes"][0]
+    assert mcp.text_is_bulk_paste_candidate("A\tB\n1\t2") is True
+    assert mcp.text_is_bulk_paste_candidate("short") is False
+    assert mcp.snapshot_has_grid_target({"elements": [{"controlType": "table cell"}]}) is True
     return 0
 
 

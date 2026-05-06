@@ -73,13 +73,14 @@ def main() -> int:
         "left_click_drag",
         "type_text",
         "type",
+        "paste_text",
         "press_key",
         "key",
         "set_value",
         "wait",
     }
     assert set(tools_by_name) == expected_tools
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.17"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.18"
     actions = set(tools_by_name["computer"]["inputSchema"]["properties"]["action"]["enum"])
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "doctor", "launch", "launch_app", "open_app", "get_cursor_position", "left_click", "left_click_drag", "hover"]:
         assert action in actions
@@ -93,6 +94,9 @@ def main() -> int:
     assert "agent" in tools_by_name["computer"]["inputSchema"]["properties"]["cursor_source"]["enum"]
     assert tools_by_name["computer"]["inputSchema"]["properties"]["cursor_source"]["default"] == "none"
     assert "keys" in tools_by_name["computer"]["inputSchema"]["properties"]["method"]["enum"]
+    assert "atspi" in tools_by_name["type_text"]["inputSchema"]["properties"]["method"]["enum"]
+    assert tools_by_name["paste_text"]["inputSchema"]["required"] == ["app", "text"]
+    assert tools_by_name["paste_text"]["inputSchema"]["properties"]["restore_clipboard"]["default"] is True
     assert tools_by_name["computer"]["inputSchema"]["properties"]["prefer_related"]["type"] == "boolean"
     assert tools_by_name["computer"]["inputSchema"]["properties"]["restore_clipboard"]["type"] == "boolean"
     assert tools_by_name["computer"]["inputSchema"]["properties"]["restore_delay"]["default"] == 1.0

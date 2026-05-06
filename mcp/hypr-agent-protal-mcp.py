@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.17"
+SERVER_VERSION = "0.3.18"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -162,8 +162,8 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         },
         "method": {
             "type": "string",
-            "enum": ["auto", "paste", "keys"],
-            "description": "For type, choose auto, clipboard paste, or literal key events.",
+            "enum": ["auto", "paste", "keys", "atspi"],
+            "description": "For type, choose auto, clipboard paste, literal key events, or explicit AT-SPI text insertion.",
             "default": "auto",
         },
         "repeat": {"type": "integer", "description": "Number of times to repeat a key action."},
@@ -451,15 +451,44 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "type_text",
-            "description": "Type literal text into the target app, preferring AT-SPI editable text then background input fallback.",
+            "description": "Type literal text into the target app. Use paste_text for multiline, tabular, CSV/TSV, Unicode-heavy, or long text. method=auto uses background key/paste input; method=atspi explicitly requests accessibility text insertion.",
             "annotations": ACTION_ANNOTATIONS,
-            "inputSchema": object_schema({"app": app, "text": string_property("Literal text to type.")}, ["app", "text"]),
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "text": string_property("Literal text to type."),
+                    "method": {"type": "string", "enum": ["auto", "paste", "keys", "atspi"], "default": "auto"},
+                },
+                ["app", "text"],
+            ),
         },
         {
             "name": "type",
             "description": "Compatibility alias for type_text.",
             "annotations": ACTION_ANNOTATIONS,
-            "inputSchema": object_schema({"app": app, "text": string_property("Literal text to type.")}, ["app", "text"]),
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "text": string_property("Literal text to type."),
+                    "method": {"type": "string", "enum": ["auto", "paste", "keys", "atspi"], "default": "auto"},
+                },
+                ["app", "text"],
+            ),
+        },
+        {
+            "name": "paste_text",
+            "description": "Paste text through the clipboard into the target app. Prefer this for multiline, tabular, CSV/TSV, Unicode-heavy, or long text because it is much faster than key-by-key typing.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "text": string_property("Text to place on the clipboard and paste into the target app."),
+                    "restore_clipboard": {"type": "boolean", "default": True},
+                    "restore_delay": number_property("Seconds to wait before restoring clipboard after paste. Defaults to 1."),
+                    "prefer_related": {"type": "boolean", "default": True},
+                },
+                ["app", "text"],
+            ),
         },
         {
             "name": "press_key",
@@ -1956,6 +1985,40 @@ def element_hint_record(element: dict[str, Any]) -> dict[str, Any]:
     return record
 
 
+def element_role_is_tab_like(role: str) -> bool:
+    if role in {"tab", "page tab", "tab list", "page tab list"}:
+        return True
+    words = set(role.replace("-", " ").split())
+    return "tab" in words and "table" not in words
+
+
+def text_is_bulk_paste_candidate(text: str) -> bool:
+    return "\n" in text or "\t" in text or len(text) > 80
+
+
+def snapshot_has_grid_target(snapshot: dict[str, Any]) -> bool:
+    for element in snapshot.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        role = element_role(element)
+        if role in {"table", "table cell", "spreadsheet"} or "spreadsheet" in role:
+            return True
+    return False
+
+
+def prepare_grid_bulk_paste(snapshot: dict[str, Any], text: str) -> dict[str, Any] | None:
+    if not text_is_bulk_paste_candidate(text) or not snapshot_has_grid_target(snapshot):
+        return None
+    target = str(snapshot.get("target") or "")
+    if not target:
+        return None
+    # In grids/spreadsheets, Ctrl+V while a cell is being edited inserts all
+    # lines into that one cell. Escape returns to cell-selection mode first.
+    info = keyboard(target, "escape", "")
+    time.sleep(0.08)
+    return info
+
+
 def ui_hints_for_elements(snapshot: dict[str, Any], elements: list[dict[str, Any]]) -> dict[str, Any]:
     hints: dict[str, Any] = {
         "notes": [
@@ -1972,7 +2035,7 @@ def ui_hints_for_elements(snapshot: dict[str, Any], elements: list[dict[str, Any
         role = element_role(element)
         if role == "menu":
             hints["visibleMenus"].append(element_hint_record(element))
-        elif "tab" in role or role in {"page tab", "page tab list"}:
+        elif element_role_is_tab_like(role):
             hints["visibleTabs"].append(element_hint_record(element))
         elif role in {"tool bar", "toolbar"} or "tool bar" in role or "toolbar" in role:
             hints["visibleToolbars"].append(element_hint_record(element))
@@ -2400,7 +2463,7 @@ def type_text(target: str, text: str, args: dict[str, Any]) -> dict[str, Any]:
     prefer_related = args.get("prefer_related")
     target_for_input, related = prefer_related_target(target, True if not isinstance(prefer_related, bool) else prefer_related)
 
-    if method == "keys" or (method == "auto" and len(text) <= 80 and can_type_with_keys(text)):
+    if method == "keys" or (method == "auto" and not text_is_bulk_paste_candidate(text) and can_type_with_keys(text)):
         info = type_with_keys(target_for_input, text)
         info.update({"target": target, "resolvedTarget": target_for_input, "relatedTarget": related})
         return info
@@ -2818,10 +2881,35 @@ def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("Missing required argument: text")
     snapshot = current_snapshot(app)
     control_overlay(snapshot, action="type")
-    if atspi_insert_text_isolated(snapshot, text):
+    method = args.get("method") if isinstance(args.get("method"), str) else "auto"
+    if method == "atspi" and atspi_insert_text_isolated(snapshot, text):
         return mcp_snapshot_result(build_app_snapshot(app))
-    type_text(str(snapshot["target"]), text, {"method": "auto"})
+    type_args = dict(args)
+    if method == "atspi":
+        type_args["method"] = "auto"
+    prepare_grid_bulk_paste(snapshot, text)
+    type_text(str(snapshot["target"]), text, type_args)
     return mcp_snapshot_result(build_app_snapshot(app))
+
+
+def semantic_paste_text(args: dict[str, Any]) -> dict[str, Any]:
+    app = str(args.get("app") or "")
+    text = args.get("text")
+    if not isinstance(text, str):
+        raise RuntimeError("Missing required argument: text")
+    snapshot = current_snapshot(app)
+    control_overlay(snapshot, action="type")
+    target = str(snapshot["target"])
+    prepare_info = prepare_grid_bulk_paste(snapshot, text)
+    prefer_related = args.get("prefer_related")
+    target_for_input, related = prefer_related_target(target, True if not isinstance(prefer_related, bool) else prefer_related)
+    target_is_xwayland = target_uses_xwayland(target_for_input, related)
+    clipboard = clipboard_snapshot_text()
+    methods = set_clipboard_text(text, target_is_xwayland)
+    info = paste(target, args, methods, text_clipboard_snapshot=clipboard, target_for_input=target_for_input, related=related)
+    if prepare_info is not None:
+        info["preparedForGridPaste"] = {"escape": prepare_info}
+    return result_text(info)
 
 
 def semantic_press_key(args: dict[str, Any]) -> dict[str, Any]:
@@ -2956,6 +3044,7 @@ SEMANTIC_TOOLS = {
     "move_mouse": semantic_hover,
     "type_text": semantic_type_text,
     "type": semantic_type_text,
+    "paste_text": semantic_paste_text,
     "press_key": semantic_press_key,
     "key": semantic_press_key,
     "set_value": semantic_set_value,
@@ -3006,6 +3095,8 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
             return semantic_drag(args)
         if action == "type":
             return semantic_type_text(args)
+        if action == "paste_text":
+            return semantic_paste_text(args)
         if action == "key":
             return semantic_press_key(args)
 
