@@ -61,6 +61,25 @@ def main() -> int:
     file_menu_global = {"x": 1772.0, "y": 2108.0, "width": 57.0, "height": 22.0}
     global_frame = mcp.atspi_bounds_to_screenshot_frame(file_menu_global, root_global, screenshot, window)
     assert global_frame == frame
+    corrected, offset = mcp.corrected_large_grid_cell_bounds(
+        {"x": 40.5, "y": 146.5, "width": 149.0, "height": 30.0},
+        {"x": 40.5, "y": 146.5, "width": 1308.0, "height": 596.0},
+        row=0,
+        col=0,
+        large_grid=True,
+        header_y_offset=None,
+    )
+    near(offset, 30.0)
+    near(corrected["y"], 176.5)
+    second, offset = mcp.corrected_large_grid_cell_bounds(
+        {"x": 40.5, "y": 176.5, "width": 149.0, "height": 30.0},
+        {"x": 40.5, "y": 146.5, "width": 1308.0, "height": 596.0},
+        row=1,
+        col=0,
+        large_grid=True,
+        header_y_offset=offset,
+    )
+    near(second["y"], 206.5)
 
     snapshot = {"window": window, "screenshot": screenshot}
     near(mcp.window_point_to_global(snapshot, 0, 0)[0], 1772.0)

@@ -2055,6 +2055,25 @@ def atspi_image_frame(
     return atspi_bounds_to_screenshot_frame(bounds, atspi_window_bounds, screenshot, hypr_window)
 
 
+def corrected_large_grid_cell_bounds(
+    cell_bounds: dict[str, float],
+    table_bounds: dict[str, float],
+    *,
+    row: int,
+    col: int,
+    large_grid: bool,
+    header_y_offset: float | None,
+) -> tuple[dict[str, float], float | None]:
+    if large_grid and header_y_offset is None and row == 0 and col == 0:
+        same_origin_y = abs(float(cell_bounds.get("y") or 0.0) - float(table_bounds.get("y") or 0.0)) <= 1.0
+        header_y_offset = float(cell_bounds.get("height") or 0.0) if same_origin_y else 0.0
+    if header_y_offset:
+        corrected = dict(cell_bounds)
+        corrected["y"] = float(corrected["y"]) + header_y_offset
+        return corrected, header_y_offset
+    return cell_bounds, header_y_offset
+
+
 def atspi_record_for(
     node: Any,
     index: int,
@@ -2147,8 +2166,12 @@ def atspi_render_tree(root: Any, root_path: list[int], screenshot: dict[str, Any
         if table_iface is None:
             return False
 
-        max_rows = min(int(atspi_safe(lambda: _ATSPI.Table.get_n_rows(table_iface), 0) or 0), 200)
-        max_cols = min(int(atspi_safe(lambda: _ATSPI.Table.get_n_columns(table_iface), 0) or 0), 200)
+        total_rows = int(atspi_safe(lambda: _ATSPI.Table.get_n_rows(table_iface), 0) or 0)
+        total_cols = int(atspi_safe(lambda: _ATSPI.Table.get_n_columns(table_iface), 0) or 0)
+        max_rows = min(total_rows, 200)
+        max_cols = min(total_cols, 200)
+        large_grid = total_rows > 1000 or total_cols > 100
+        header_y_offset: float | None = None
         empty_rows = 0
         for row in range(max_rows):
             if budget_exhausted():
@@ -2170,6 +2193,14 @@ def atspi_render_tree(root: Any, root_path: list[int], screenshot: dict[str, Any
                     if col > 0 and empty_cols >= 3:
                         break
                     continue
+                cell_bounds, header_y_offset = corrected_large_grid_cell_bounds(
+                    cell_bounds,
+                    table_bounds,
+                    row=row,
+                    col=col,
+                    large_grid=large_grid,
+                    header_y_offset=header_y_offset,
+                )
                 row_visible = True
                 empty_cols = 0
                 child_index = atspi_safe(lambda r=row, c=col: _ATSPI.Table.get_index_at(table_iface, r, c))
