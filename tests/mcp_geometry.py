@@ -104,6 +104,8 @@ def main() -> int:
         selected, meta = mcp.prefer_related_target("address:0x1")
         assert selected == "address:0x3"
         assert meta and meta["address"] == "0x3"
+        active = mcp.active_related_windows(mcp.related_windows_for("address:0x1"))
+        assert [item["address"] for item in active] == ["0x3"]
     finally:
         mcp.related_windows_for = original_related_windows_for
 
@@ -170,6 +172,14 @@ def main() -> int:
     assert "Global menu models:" in rendered
     assert "menu:1 Open" in rendered
     assert mcp.find_global_menu_item(menu_snapshot, "menu:1")["label"] == "Open"
+    popup_snapshot = {
+        **menu_snapshot,
+        "activeRelatedTarget": "address:0xpopup",
+        "activeRelatedWindow": {"address": "0xpopup", "title": "Chart Type", "class": "soffice"},
+    }
+    rendered_popup = mcp.render_snapshot_text(popup_snapshot)
+    assert "ACTIVE RELATED POPUP DETECTED:" in rendered_popup
+    assert "address:0xpopup" in rendered_popup
     gmenu_action = {"objectPath": "/org/example/window/1/menus/menubar", "action": "win.insert-chart"}
     assert mcp.gtk_action_candidates_for_menu(gmenu_action)[0] == ("/org/example/window/1", "insert-chart")
     assert mcp.text_is_bulk_paste_candidate("A\tB\n1\t2") is True

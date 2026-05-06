@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.23"
+SERVER_VERSION = "0.3.24"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 
@@ -691,10 +691,19 @@ def mcp_text(text: str, *, is_error: bool = False, structured: dict[str, Any] | 
 
 def mcp_snapshot_result(snapshot: dict[str, Any]) -> dict[str, Any]:
     content = [{"type": "text", "text": render_snapshot_text(snapshot)}]
+    related_image = snapshot.get("activeRelatedScreenshotPngBase64")
+    active_related = snapshot.get("activeRelatedWindow") or {}
+    if isinstance(related_image, str) and related_image:
+        title = str(active_related.get("title") or active_related.get("initialTitle") or "related popup")
+        target = f"address:{active_related.get('address')}" if active_related.get("address") else ""
+        content.append({"type": "text", "text": f'Active related popup screenshot: "{title}" {target}'.strip()})
+        content.append({"type": "image", "mimeType": "image/png", "data": related_image})
     image = snapshot.get("screenshotPngBase64")
     if isinstance(image, str) and image:
+        if isinstance(related_image, str) and related_image:
+            content.append({"type": "text", "text": "Root target screenshot:"})
         content.append({"type": "image", "mimeType": "image/png", "data": image})
-    structured = {k: v for k, v in snapshot.items() if k != "screenshotPngBase64"}
+    structured = {k: v for k, v in snapshot.items() if k not in {"screenshotPngBase64", "activeRelatedScreenshotPngBase64"}}
     return {"content": content, "structuredContent": structured, "isError": False}
 
 
@@ -764,6 +773,49 @@ def related_popups_for(target: str) -> list[dict[str, Any]]:
         if is_popup or is_dialog_like:
             candidates.append(window)
     return candidates
+
+
+def active_related_windows(related_windows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for window in related_windows:
+        if not isinstance(window, dict) or window.get("hyprAgentProtalRelation") != "related":
+            continue
+        if not isinstance(window.get("address"), str):
+            continue
+        if window.get("hidden", False) or not window.get("mapped", True):
+            continue
+        is_popup = window.get("hyprAgentProtalWindowKind") == "popup"
+        is_dialog = bool(window.get("floating"))
+        if is_popup or is_dialog:
+            candidates.append(window)
+    candidates.sort(
+        key=lambda window: (
+            0 if window.get("hyprAgentProtalWindowKind") == "popup" else 1,
+            int(window.get("focusHistoryID") if isinstance(window.get("focusHistoryID"), int) else 1_000_000),
+        )
+    )
+    return candidates
+
+
+def attach_active_related_preview(snapshot: dict[str, Any]) -> None:
+    related = active_related_windows([item for item in snapshot.get("relatedWindows") or [] if isinstance(item, dict)])
+    if not related:
+        return
+    active = related[0]
+    snapshot["activeRelatedWindow"] = active
+    snapshot["activeRelatedTarget"] = f"address:{active.get('address')}"
+    snapshot["attention"] = {
+        "type": "active-related-popup",
+        "target": snapshot["activeRelatedTarget"],
+        "title": str(active.get("title") or active.get("initialTitle") or ""),
+        "message": "A related popup/dialog is open. Operate this target before continuing with the root window.",
+    }
+    try:
+        screenshot, png_base64 = screenshot_for_window(active)
+        snapshot["activeRelatedScreenshot"] = screenshot
+        snapshot["activeRelatedScreenshotPngBase64"] = png_base64
+    except Exception as exc:
+        snapshot["activeRelatedScreenshotError"] = str(exc)
 
 
 def session_action(action: str, target: str) -> dict[str, Any]:
@@ -2929,6 +2981,7 @@ def build_app_snapshot(app_query: str) -> dict[str, Any]:
     snapshot["uiHints"] = ui_hints_for_elements(snapshot, elements)
     if related_error:
         snapshot["relatedWindowsError"] = related_error
+    attach_active_related_preview(snapshot)
     remember_snapshot(app_query, snapshot)
     return snapshot
 
@@ -2947,6 +3000,21 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
             bool(window.get("xwayland")),
         ),
     ]
+    active_related = snapshot.get("activeRelatedWindow") or {}
+    if active_related:
+        title = str(active_related.get("title") or active_related.get("initialTitle") or "")
+        klass = str(active_related.get("class") or active_related.get("initialClass") or "")
+        target = snapshot.get("activeRelatedTarget") or (f"address:{active_related.get('address')}" if active_related.get("address") else "")
+        lines.extend(
+            [
+                "",
+                "ACTIVE RELATED POPUP DETECTED:",
+                f'- target={target} title="{title}" class={klass}',
+                "- Operate this popup/dialog target first. Its screenshot is attached before the root window screenshot.",
+            ]
+        )
+        if snapshot.get("activeRelatedScreenshotError"):
+            lines.append(f"- popup screenshot unavailable: {snapshot.get('activeRelatedScreenshotError')}")
     related = [
         window
         for window in snapshot.get("relatedWindows") or []

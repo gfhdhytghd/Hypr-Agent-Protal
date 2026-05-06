@@ -67,21 +67,24 @@ Recommended agent workflow:
    `target` selector plus the next `get_app_state` hint.
 5. Call `get_app_state` for semantic state, or `screenshot` with `app` for an
    image-only refresh.
-6. Prefer `element_index` from `get_app_state`. When coordinates are needed,
+6. If `get_app_state` reports `ACTIVE RELATED POPUP DETECTED`, operate the
+   shown `target=address:0x...` popup/dialog before continuing with the root
+   window. The popup screenshot is attached before the root-window screenshot.
+7. Prefer `element_index` from `get_app_state`. When coordinates are needed,
    use `coordinate_space=screenshot` with screenshot pixels, or
    `coordinate_space=window` with target-window-relative logical coordinates.
-7. Use `paste_text` for multiline, tabular, CSV/TSV, Unicode-heavy, or long
+8. Use `paste_text` for multiline, tabular, CSV/TSV, Unicode-heavy, or long
    text. Do not enter datasets with repeated `type_text`/`key` calls unless
    paste is unavailable. For grid-like targets, bulk paste first exits cell
    edit mode so TSV/CSV expands into cells instead of becoming one cell's text.
-8. Read `uiHints` before acting on menus, tabs, or toolbars. `controlType=menu`
+9. Read `uiHints` before acting on menus, tabs, or toolbars. `controlType=menu`
    is a toolkit role and may mean a classic menu, command label, or
    ribbon/notebookbar page selector. Verify the screenshot and refreshed app
    state instead of assuming the visual meaning.
-9. If `get_app_state` exposes `globalMenu` actions, use `activate_menu_item`
+10. If `get_app_state` exposes `globalMenu` actions, use `activate_menu_item`
    with the returned `menu_index` for app-menu commands. If no global menu item
    is exposed, use visible elements or screenshot/window-relative coordinates.
-10. If using the compatibility `computer` tool, pass `app` when possible. When
+11. If using the compatibility `computer` tool, pass `app` when possible. When
    only `target` is available, `coordinate_space=screenshot` and
    `coordinate_space=window` still use target-relative coordinates; use
    `coordinate_space=global` only for deliberate low-level fallback.
@@ -126,6 +129,7 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 - `list_apps`: lists running Hyprland windows with stable selectors, classes, titles, pid, workspace, geometry, and XWayland status.
 - `launch_app` / `open_app`: starts apps through Hyprland, applies accessibility environment/flags, waits for a new window, and returns its selector.
 - `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree plus `uiHints` for menus, tabs, and toolbars. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback. AT-SPI frames are normalized to screenshot pixels, including target-window captures that contain compositor shadow/border margins. When the target process exposes DBusMenu or GMenu app-menu models, the result also includes `globalMenu` providers and `menu_index` actions.
+- Active related popups/dialogs: when a same-process popup or floating dialog is open for the target, `get_app_state` adds an `ACTIVE RELATED POPUP DETECTED` notice, `activeRelatedTarget`, and an extra popup screenshot before the root-window screenshot. Agents should switch to that popup target first.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
 - `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`, `activate_menu_item`: operate on the last app-state snapshot by `element_index` or `menu_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
