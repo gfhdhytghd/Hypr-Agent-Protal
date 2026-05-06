@@ -53,6 +53,7 @@ std::vector<SP<CEventLoopTimer>> g_workspaceRestackTimers;
 SP<CEventLoopTimer>              g_indicatorHideTimer;
 SP<CEventLoopTimer>              g_indicatorAnimationTimer;
 CHyprSignalListener              g_windowOpenListener;
+CHyprSignalListener              g_windowOpenEarlyListener;
 CHyprSignalListener              g_renderStageListener;
 PHLWINDOWREF                     g_agentPointerWindow;
 std::optional<Vector2D>          g_agentPointerPosition;
@@ -1046,6 +1047,22 @@ void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window
     }
 }
 
+void placeRelatedWindowOnRootWorkspaceEarly(WorkspaceSession& session, const PHLWINDOW& window) {
+    if (!window || !window->m_isMapped)
+        return;
+
+    const auto root = session.root.lock();
+    if (!root || root == window)
+        return;
+
+    const auto targetWorkspace = workspaceSessionTarget(session);
+    if (!targetWorkspace || targetWorkspace->inert() || window->m_workspace == targetWorkspace)
+        return;
+
+    window->moveToWorkspace(targetWorkspace);
+    window->m_monitor = targetWorkspace->m_monitor;
+}
+
 void scheduleRelatedWindowRestack(const PHLWINDOW& root, const PHLWINDOW& window) {
     if (!g_pEventLoopManager || !root || !window || root == window)
         return;
@@ -1108,6 +1125,16 @@ void handleWorkspaceSessionWindowOpen(const PHLWINDOW& window) {
     for (auto& session : g_workspaceSessions) {
         if (workspaceSessionMatchesWindow(session, window))
             moveRelatedWindowToSessionWorkspace(session, window);
+    }
+}
+
+void handleWorkspaceSessionWindowOpenEarly(const PHLWINDOW& window) {
+    if (!window || g_workspaceSessions.empty())
+        return;
+
+    for (auto& session : g_workspaceSessions) {
+        if (workspaceSessionMatchesWindow(session, window))
+            placeRelatedWindowOnRootWorkspaceEarly(session, window);
     }
 }
 
@@ -1764,6 +1791,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:keyboard", dispatchKeyboard);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:screenshot", dispatchScreenshot);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:session", dispatchSession);
+    g_windowOpenEarlyListener = Event::bus()->m_events.window.openEarly.listen([](PHLWINDOW window) { handleWorkspaceSessionWindowOpenEarly(window); });
     g_windowOpenListener = Event::bus()->m_events.window.open.listen([](PHLWINDOW window) { handleWorkspaceSessionWindowOpen(window); });
     g_renderStageListener = Event::bus()->m_events.render.stage.listen([](eRenderStage stage) { renderAgentIndicator(stage); });
     HyprlandAPI::reloadConfig();
@@ -1772,12 +1800,13 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.29",
+        .version = "0.3.32",
     };
 }
 
 APICALL EXPORT void PLUGIN_EXIT() {
     g_workspaceSessions.clear();
+    g_windowOpenEarlyListener.reset();
     g_windowOpenListener.reset();
     g_renderStageListener.reset();
 
