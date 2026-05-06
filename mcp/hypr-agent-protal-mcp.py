@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.8"
+SERVER_VERSION = "0.3.9"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -119,7 +119,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
             "items": {"type": "number"},
             "minItems": 2,
             "maxItems": 2,
-            "description": "Compatibility coordinate pair. With app, interpreted in coordinate_space; with target and no app, treated as low-level global logical coordinates.",
+            "description": "Compatibility coordinate pair. With app, interpreted in coordinate_space. With target and coordinate_space screenshot/window, target is treated as the app selector. Global is only for explicit coordinate_space=global fallback.",
         },
         "start_coordinate": {
             "type": "array",
@@ -134,10 +134,10 @@ COMPUTER_SCHEMA: dict[str, Any] = {
             "default": "screenshot",
             "description": "Coordinate space for app-relative compatibility aliases. Prefer screenshot pixels from get_app_state. Global is only for low-level computer fallback.",
         },
-        "x": {"type": "number", "description": "Global logical X coordinate."},
-        "y": {"type": "number", "description": "Global logical Y coordinate."},
-        "x2": {"type": "number", "description": "Destination global logical X coordinate for drag."},
-        "y2": {"type": "number", "description": "Destination global logical Y coordinate for drag."},
+        "x": {"type": "number", "description": "X coordinate in coordinate_space; global only when coordinate_space=global."},
+        "y": {"type": "number", "description": "Y coordinate in coordinate_space; global only when coordinate_space=global."},
+        "x2": {"type": "number", "description": "Destination X coordinate for drag in coordinate_space; global only when coordinate_space=global."},
+        "y2": {"type": "number", "description": "Destination Y coordinate for drag in coordinate_space; global only when coordinate_space=global."},
         "dx": {"type": "number", "description": "Horizontal scroll wheel ticks."},
         "dy": {"type": "number", "description": "Vertical scroll wheel ticks."},
         "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"], "description": "Compatibility scroll direction."},
@@ -640,6 +640,10 @@ def mcp_snapshot_result(snapshot: dict[str, Any]) -> dict[str, Any]:
 def require_target(args: dict[str, Any]) -> str:
     target = args.get("target")
     if not isinstance(target, str) or not target:
+        app = args.get("app")
+        if isinstance(app, str) and app:
+            return window_selector(resolve_hypr_window(app))
+    if not isinstance(target, str) or not target:
         raise RuntimeError("action requires target")
     return target
 
@@ -684,14 +688,21 @@ def related_windows_for(target: str) -> list[dict[str, Any]]:
 
 
 def related_popups_for(target: str) -> list[dict[str, Any]]:
-    return [
-        window
-        for window in related_windows_for(target)
-        if window.get("hyprAgentProtalRelation") == "related"
-        and isinstance(window.get("address"), str)
-        and not window.get("hidden", False)
-        and window.get("mapped", True)
-    ]
+    windows = related_windows_for(target)
+    root = next((window for window in windows if window.get("hyprAgentProtalRelation") == "self"), None)
+    root_class = normalize((root or {}).get("class") or (root or {}).get("initialClass"))
+    candidates = []
+    for window in windows:
+        if window.get("hyprAgentProtalRelation") != "related" or not isinstance(window.get("address"), str):
+            continue
+        if window.get("hidden", False) or not window.get("mapped", True):
+            continue
+        window_class = normalize(window.get("class") or window.get("initialClass"))
+        is_popup = window.get("hyprAgentProtalWindowKind") == "popup"
+        is_dialog_like = bool(window.get("floating")) or (bool(root_class) and window_class != root_class)
+        if is_popup or is_dialog_like:
+            candidates.append(window)
+    return candidates
 
 
 def session_action(action: str, target: str) -> dict[str, Any]:
@@ -2178,18 +2189,9 @@ def prefer_related_target(target: str, enabled: bool = True) -> tuple[str, dict[
         return target, None
 
     try:
-        windows = related_windows_for(target)
+        related = related_popups_for(target)
     except Exception:
         return target, None
-
-    related = [
-        window
-        for window in windows
-        if window.get("hyprAgentProtalRelation") == "related"
-        and isinstance(window.get("address"), str)
-        and not window.get("hidden", False)
-        and window.get("mapped", True)
-    ]
     if not related:
         return target, None
 
@@ -2863,6 +2865,36 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
         mapped.update({"action": "drag", "x": start[0], "y": start[1], "x2": end[0], "y2": end[1], "button": "left"})
         args = mapped
         action = "drag"
+
+    target = args.get("target")
+    coordinate_space = normalize(args.get("coordinate_space") or "screenshot")
+    if (
+        isinstance(target, str)
+        and target
+        and not isinstance(args.get("app"), str)
+        and coordinate_space in {"screenshot", "window", "screenshot-pixel", "screenshot-pixels", "image", "pixel", "pixels", "window-relative", "window-logical", "logical"}
+    ):
+        mapped = dict(args)
+        mapped["app"] = target
+        if action == "move":
+            return semantic_hover(mapped)
+        if action == "click":
+            return semantic_click(mapped)
+        if action == "doubleclick":
+            mapped["click_count"] = 2
+            return semantic_click(mapped)
+        if action == "scroll":
+            if "direction" not in mapped and isinstance(args.get("scroll_direction"), str):
+                mapped["direction"] = args.get("scroll_direction")
+            if "pages" not in mapped and isinstance(args.get("scroll_amount"), (int, float)):
+                mapped["pages"] = max(1.0, float(args["scroll_amount"]) / 5.0)
+            return semantic_scroll(mapped)
+        if action == "drag":
+            if "start_coordinate" not in mapped and isinstance(args.get("x"), (int, float)) and isinstance(args.get("y"), (int, float)):
+                mapped["start_coordinate"] = [float(args["x"]), float(args["y"])]
+            if "coordinate" not in mapped and isinstance(args.get("x2"), (int, float)) and isinstance(args.get("y2"), (int, float)):
+                mapped["coordinate"] = [float(args["x2"]), float(args["y2"])]
+            return semantic_drag(mapped)
 
     if action == "screenshot":
         cmd = ["screenshot", "--base64"]

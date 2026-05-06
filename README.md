@@ -67,7 +67,10 @@ Recommended agent workflow:
 6. Prefer `element_index` from `get_app_state`. When coordinates are needed,
    use `coordinate_space=screenshot` with screenshot pixels, or
    `coordinate_space=window` with target-window-relative logical coordinates.
-7. Use `computer` with `target` and global `x/y` only as a low-level fallback.
+7. If using the compatibility `computer` tool, pass `app` when possible. When
+   only `target` is available, `coordinate_space=screenshot` and
+   `coordinate_space=window` still use target-relative coordinates; use
+   `coordinate_space=global` only for deliberate low-level fallback.
 
 Apps launched through `launch_app`/`open_app` automatically get accessibility
 environment variables:
@@ -112,7 +115,7 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 - `click`, `scroll`, `drag`, `type_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
 
-The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch.
+The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch. Compatibility calls that provide `target` instead of `app` use the same target-relative conversion unless `coordinate_space=global` is explicit.
 
 ### AT-SPI App State
 
@@ -144,9 +147,9 @@ The compatibility `computer` tool still exposes these lower-level actions:
 
 - `screenshot`: captures compositor screenshots and returns PNG image content plus metadata. Pass `target` for unoccluded target-window capture. Screenshot cursor drawing is a debug option and is off by default; use `show_cursor=true` or `cursor_source` values `auto`, `agent`, `hyprland`, `none` to draw it into the returned PNG.
 - `windows`: lists Hyprland clients with addresses, classes, titles, geometry, and workspace data. Pass `related_to` to return the selected client plus same-process related windows such as dialogs or helper popups.
-- `move`, `click`, `doubleclick`, `press`, `release`: sends pointer input to a target window selector such as `address:0x1234`.
+- `move`, `click`, `doubleclick`, `press`, `release`: sends pointer input to a target window selector such as `address:0x1234`; screenshot/window coordinate spaces are converted relative to that target.
 - `scroll`: sends wheel axis events to a target window.
-- `drag`: presses, moves, and releases on the target window through the native pointer dispatcher.
+- `drag`: presses, moves, and releases on the target window through the native pointer dispatcher; screenshot/window coordinate spaces are converted relative to that target.
 - `key`: sends a shortcut such as `ctrl+v`, `enter`, `alt+left`, or `escape` to a target window. It accepts `key`, `keys`, `modifiers`, and raw evdev `keycode` for ydotool-style fallback.
 - `type`: sends text to the target input. Use `method` values `auto`, `keys`, or `paste`; by default it types short ASCII text as key events and uses clipboard paste for Unicode or longer text.
 - `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.

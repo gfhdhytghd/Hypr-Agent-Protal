@@ -61,6 +61,37 @@ def main() -> int:
     shadow_pos = mcp.snapshot_position(snapshot, 3190.0, 2108.0)
     assert shadow_pos["insideScreenshot"] is True
     assert shadow_pos["insideWindow"] is False
+
+    original_related_windows_for = mcp.related_windows_for
+    try:
+        mcp.related_windows_for = lambda target: [
+            {"address": "0x1", "hyprAgentProtalRelation": "self", "class": "libreoffice-calc", "mapped": True, "hidden": False},
+            {
+                "address": "0x2",
+                "hyprAgentProtalRelation": "related",
+                "hyprAgentProtalWindowKind": "related",
+                "class": "libreoffice-calc",
+                "mapped": True,
+                "hidden": False,
+                "floating": False,
+            },
+            {
+                "address": "0x3",
+                "hyprAgentProtalRelation": "related",
+                "hyprAgentProtalWindowKind": "related",
+                "class": "soffice",
+                "mapped": True,
+                "hidden": False,
+                "floating": True,
+            },
+        ]
+        related = mcp.related_popups_for("address:0x1")
+        assert [item["address"] for item in related] == ["0x3"]
+        selected, meta = mcp.prefer_related_target("address:0x1")
+        assert selected == "address:0x3"
+        assert meta and meta["address"] == "0x3"
+    finally:
+        mcp.related_windows_for = original_related_windows_for
     return 0
 
 
