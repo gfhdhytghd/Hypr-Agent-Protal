@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.30"
+SERVER_VERSION = "0.3.31"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
@@ -3145,6 +3145,18 @@ def compact_window_info(window: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compact_element_info(element: dict[str, Any], x: float, y: float, coordinate_space: str) -> dict[str, Any]:
+    frame = element.get("frame") if isinstance(element.get("frame"), dict) else {}
+    return {
+        "index": element.get("index"),
+        "name": str(element.get("name") or ""),
+        "value": str(element.get("value") or ""),
+        "controlType": str(element.get("controlType") or element.get("localizedControlType") or ""),
+        "coordinate": {"x": x, "y": y, "coordinateSpace": coordinate_space},
+        "frame": frame,
+    }
+
+
 def window_delta(before_windows: list[dict[str, Any]], after_windows: list[dict[str, Any]]) -> dict[str, Any]:
     before = {normalize(window.get("address")): window for window in before_windows if isinstance(window, dict) and window.get("address")}
     after = {normalize(window.get("address")): window for window in after_windows if isinstance(window, dict) and window.get("address")}
@@ -3156,6 +3168,31 @@ def window_delta(before_windows: list[dict[str, Any]], after_windows: list[dict[
     if closed:
         result["closed"] = closed
     return result
+
+
+def action_popup_mismatch(action_result: dict[str, Any], opened: list[dict[str, Any]]) -> dict[str, Any] | None:
+    clicked = action_result.get("clickedElement")
+    if not isinstance(clicked, dict) or not opened:
+        return None
+    clicked_text = normalize(" ".join([str(clicked.get("name") or ""), str(clicked.get("value") or "")]))
+    if not clicked_text:
+        return None
+    clicked_tokens = [token for token in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", clicked_text) if len(token) >= 2]
+    if not clicked_tokens:
+        return None
+    unexpected = []
+    for item in opened:
+        title = normalize(item.get("title") or "")
+        if title and not any(token in title for token in clicked_tokens):
+            unexpected.append(item)
+    if not unexpected:
+        return None
+    return {
+        "type": "action-opened-unexpected-window",
+        "clickedElement": clicked,
+        "opened": unexpected,
+        "message": "The action opened a related window whose title does not match the clicked element text. Refresh app state and recover instead of continuing the assumed workflow.",
+    }
 
 
 def merge_last_action(after: dict[str, Any], before: dict[str, Any], action_result: dict[str, Any] | None = None) -> None:
@@ -3170,6 +3207,10 @@ def merge_last_action(after: dict[str, Any], before: dict[str, Any], action_resu
         info["windowDelta"] = delta
         if delta.get("opened"):
             info["message"] = "The action changed the related window set; inspect opened/closed windows before continuing."
+            mismatch = action_popup_mismatch(info, [item for item in delta.get("opened") or [] if isinstance(item, dict)])
+            if mismatch:
+                info["warning"] = mismatch
+                after["attention"] = mismatch
     after["lastAction"] = info
 
 
@@ -3218,6 +3259,21 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
         ),
     ]
     last_action = snapshot.get("lastAction") or {}
+    attention = snapshot.get("attention") or {}
+    if isinstance(attention, dict) and attention.get("type") == "action-opened-unexpected-window":
+        lines.extend(
+            [
+                "",
+                "ACTION WARNING:",
+                f"- {attention.get('message')}",
+            ]
+        )
+        clicked = attention.get("clickedElement") or {}
+        if isinstance(clicked, dict):
+            lines.append('- clicked element index={0} name="{1}" value="{2}"'.format(clicked.get("index"), clicked.get("name"), clicked.get("value")))
+        for item in (attention.get("opened") or [])[:4]:
+            if isinstance(item, dict):
+                lines.append('- opened {0} title="{1}" class={2}'.format(item.get("target"), item.get("title"), item.get("class")))
     if isinstance(last_action, dict) and last_action.get("targetClosed"):
         lines.extend(
             [
@@ -3500,12 +3556,28 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
             else:
                 control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
                 if atspi_do_action_isolated(snapshot, element):
-                    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+                    return mcp_snapshot_result(
+                        snapshot_after_action(
+                            app,
+                            snapshot,
+                            {"method": "atspi", "clickedElement": compact_element_info(element, float(x), float(y), coordinate_space)},
+                        )
+                    )
                 if mode == "atspi":
                     raise RuntimeError("AT-SPI element action failed; use element_click_mode=pointer for native pointer click")
 
     global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
     action = "doubleclick" if click_count > 1 and button == "left" else "click"
+    info: dict[str, Any] = {
+        "method": "pointer",
+        "target": target,
+        "button": button,
+        "clickCount": click_count,
+        "coordinate": {"x": float(x), "y": float(y), "coordinateSpace": coordinate_space},
+        "global": {"x": global_x, "y": global_y},
+    }
+    if element is not None:
+        info["clickedElement"] = compact_element_info(element, float(x), float(y), coordinate_space)
     for index in range(max(1, click_count)):
         if action == "doubleclick":
             break
@@ -3514,7 +3586,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
             time.sleep(0.12)
     if action == "doubleclick":
         call_ctl(["pointer", "--json", target, str(global_x), str(global_y), "doubleclick", button])
-    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot, info))
 
 
 def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:

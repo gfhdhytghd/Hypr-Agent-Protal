@@ -75,6 +75,10 @@ Recommended agent workflow:
    `continuedWithTarget` instead of retrying the closed popup target.
    When an action is expected to open or close a dialog/window, use
    `wait_for_window` or `wait_for_close` rather than acting on a stale snapshot.
+   If an action result reports `ACTION WARNING` /
+   `action-opened-unexpected-window`, stop the current assumed workflow,
+   inspect the opened window and refreshed app state, then recover from the
+   actual UI state.
 7. Prefer `element_index` from `get_app_state`. Element-index clicks use the
    element's visible screenshot center and native pointer input by default, so
    they behave like real background clicks and show the visible agent cursor.
@@ -142,6 +146,7 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 - Active related popups/dialogs: when a same-process popup or floating dialog is open for the target, `get_app_state` adds an `ACTIVE RELATED POPUP DETECTED` notice, `activeRelatedTarget`, and an extra popup screenshot before the root-window screenshot. Agents should switch to that popup target first.
 - Popup/dialog close handling: if an action such as OK, Finish, Cancel, Enter, or Escape closes the current popup target, semantic action tools return the surviving related/root app state with `lastAction.targetClosed=true` and an `ACTION RESULT` notice instead of surfacing the closed popup as `appNotFound`.
 - Window lifecycle waits: `wait_for_window` waits for a new or same-process related popup/dialog and returns that target's app state. `wait_for_close` waits until a target disappears and can return the surviving `related_to` root state. Semantic action results include `lastAction.windowDelta.opened/closed` when the related window set changes.
+- Action mismatch warnings: when an element click opens a related popup/dialog whose title does not match the clicked element text, the returned state includes `ACTION WARNING`, `attention.type=action-opened-unexpected-window`, and the clicked/opened details. Agents should refresh and recover from the actual UI state instead of continuing the assumed workflow.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
 - `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`, `activate_menu_item`: operate on the last app-state snapshot by `element_index` or `menu_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. For `click`, `element_index` is converted to the visible element center and sent through native pointer input by default. Use `element_click_mode=auto` or `HYPR_AGENT_PROTAL_ELEMENT_CLICK_MODE=auto` to try AT-SPI activation before pointer fallback, or `element_click_mode=atspi` to require AT-SPI activation. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, `wait`, `wait_for_window`, and `wait_for_close`.
