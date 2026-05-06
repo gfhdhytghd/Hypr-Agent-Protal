@@ -75,11 +75,13 @@ Recommended agent workflow:
    paste is unavailable. For grid-like targets, bulk paste first exits cell
    edit mode so TSV/CSV expands into cells instead of becoming one cell's text.
 8. Read `uiHints` before acting on menus, tabs, or toolbars. `controlType=menu`
-   is an AT-SPI menu entry reported by the toolkit; it is not a tab/ribbon page
-   even when the visible label matches. If a visible tab/ribbon label is not
-   exposed as a tab element, click that visible label using screenshot/window
-   coordinates and refresh `get_app_state`.
-9. If using the compatibility `computer` tool, pass `app` when possible. When
+   is a toolkit role and may mean a classic menu, command label, or
+   ribbon/notebookbar page selector. Verify the screenshot and refreshed app
+   state instead of assuming the visual meaning.
+9. If `get_app_state` exposes `globalMenu` actions, use `activate_menu_item`
+   with the returned `menu_index` for app-menu commands. If no global menu item
+   is exposed, use visible elements or screenshot/window-relative coordinates.
+10. If using the compatibility `computer` tool, pass `app` when possible. When
    only `target` is available, `coordinate_space=screenshot` and
    `coordinate_space=window` still use target-relative coordinates; use
    `coordinate_space=global` only for deliberate low-level fallback.
@@ -123,9 +125,9 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 
 - `list_apps`: lists running Hyprland windows with stable selectors, classes, titles, pid, workspace, geometry, and XWayland status.
 - `launch_app` / `open_app`: starts apps through Hyprland, applies accessibility environment/flags, waits for a new window, and returns its selector.
-- `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree plus `uiHints` for menus, tabs, and toolbars. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback. AT-SPI frames are normalized to screenshot pixels, including target-window captures that contain compositor shadow/border margins.
+- `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree plus `uiHints` for menus, tabs, and toolbars. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback. AT-SPI frames are normalized to screenshot pixels, including target-window captures that contain compositor shadow/border margins. When the target process exposes DBusMenu or GMenu app-menu models, the result also includes `globalMenu` providers and `menu_index` actions.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
-- `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`: operate on the last app-state snapshot by `element_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
+- `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`, `activate_menu_item`: operate on the last app-state snapshot by `element_index` or `menu_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.
 
 The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch. Compatibility calls that provide `target` instead of `app` use the same target-relative conversion unless `coordinate_space=global` is explicit.
@@ -142,6 +144,27 @@ draw ribbon or notebook-style page selectors while exposing top labels as
 that a tab/page is active; they should use `uiHints`, the screenshot, and
 window-relative coordinates to click the visible tab label, then refresh
 `get_app_state` before selecting controls revealed by that page.
+
+### Global App Menus
+
+Some Linux apps expose semantic app-menu models outside AT-SPI. `get_app_state`
+best-effort loads KDE's `appmenu` kded module and starts
+`plasma-gmenudbusmenuproxy.service`, then scans D-Bus services owned by the
+target window PID for:
+
+- DBusMenu providers such as `/com/canonical/dbusmenu`.
+- GMenu providers such as `org.gtk.Menus` paths ending in `/menus/menubar`.
+
+Discovered entries are returned as `globalMenu.items` and rendered as "Global
+menu actions" with stable `menu_index` values for the current snapshot. Use
+`activate_menu_item` with that `menu_index` to trigger DBusMenu/GMenu commands
+without relying on visual menu popups or AT-SPI role names.
+
+This is an opportunistic provider. Some apps expose a menu service with no
+items, expose only media/status menus, or do not publish a menu model for the
+current window. In those cases `globalMenu.status` is `unavailable` or the
+provider has `itemCount=0`; agents should continue with the visible app state
+and screenshot/window-coordinate controls.
 
 Expected coverage:
 
@@ -178,6 +201,7 @@ The compatibility `computer` tool still exposes these lower-level actions:
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
 - `doctor`: reports AT-SPI/session diagnostics and target accessibility environment hints.
+- `activate_menu_item`: activates a `globalMenu` app-menu action by `menu_index` when the target exposes DBusMenu or GMenu.
 - `launch`, `launch_app`, `open_app`: opens an app from the compatibility `computer` tool using the same accessibility environment and Chromium/Electron flags as the direct `launch_app` tool. Existing matching windows are reused by default; pass `reuse_existing=false` only for an explicitly requested new instance.
 - Compatibility action aliases inside `computer`: `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `left_click_drag`, and `get_cursor_position`.
 

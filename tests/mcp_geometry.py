@@ -150,6 +150,28 @@ def main() -> int:
         ],
     )
     assert action_hints["visibleActions"][0]["index"] == 5
+    menu_snapshot = {
+        "app": {"name": "demo", "bundleIdentifier": "demo", "pid": 42},
+        "window": {"class": "demo", "workspace": {"name": "1"}, "xwayland": False},
+        "target": "address:0x1",
+        "windowTitle": "Demo",
+        "treeLines": [],
+        "globalMenu": {
+            "providers": [{"provider": "dbusmenu", "service": ":1.2", "objectPath": "/com/canonical/dbusmenu", "itemCount": 2}],
+            "items": [
+                {"menuIndex": "menu:0", "provider": "dbusmenu", "label": "File", "depth": 0, "enabled": True},
+                {"menuIndex": "menu:1", "provider": "dbusmenu", "label": "Open", "depth": 1, "enabled": True},
+            ],
+        },
+        "uiHints": {},
+        "accessibility": {"status": "ok"},
+    }
+    rendered = mcp.render_snapshot_text(menu_snapshot)
+    assert "Global menu models:" in rendered
+    assert "menu:1 Open" in rendered
+    assert mcp.find_global_menu_item(menu_snapshot, "menu:1")["label"] == "Open"
+    gmenu_action = {"objectPath": "/org/example/window/1/menus/menubar", "action": "win.insert-chart"}
+    assert mcp.gtk_action_candidates_for_menu(gmenu_action)[0] == ("/org/example/window/1", "insert-chart")
     assert mcp.text_is_bulk_paste_candidate("A\tB\n1\t2") is True
     assert mcp.text_is_bulk_paste_candidate("short") is False
     assert mcp.snapshot_has_grid_target({"elements": [{"controlType": "table cell"}]}) is True

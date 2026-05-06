@@ -15,8 +15,9 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.22"
+SERVER_VERSION = "0.3.23"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
+GLOBAL_MENU_LIMIT = 80
 
 _ATSPI_INIT_ERROR: str | None | bool = None
 _ATSPI: Any = None
@@ -93,6 +94,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
                 "launch_app",
                 "open_app",
                 "get_cursor_position",
+                "activate_menu_item",
                 "left_click",
                 "right_click",
                 "middle_click",
@@ -196,6 +198,10 @@ COMPUTER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": "For windows, return the selected Hyprland window and same-process related windows such as dialogs or helper popups.",
         },
+        "menu_index": {
+            "type": "string",
+            "description": "Global menu item id from get_app_state, for activate_menu_item.",
+        },
     },
     "required": ["action"],
     "additionalProperties": False,
@@ -257,6 +263,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         }
     )
     element_index = string_property("Element index from the last get_app_state result.")
+    menu_index = string_property("Global menu item id from get_app_state, for example menu:12.")
     coordinate = coordinate_schema("(x, y) coordinate in coordinate_space. Defaults to screenshot pixels from get_app_state.")
     start_coordinate = coordinate_schema("(x, y) starting coordinate for a drag in coordinate_space.")
     point_props = {
@@ -359,6 +366,12 @@ def tool_definitions() -> list[dict[str, Any]]:
             "description": "Invoke a secondary AT-SPI action exposed by an element.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema({"app": app, "element_index": element_index, "action": string_property("Secondary action name.")}, ["app", "element_index", "action"]),
+        },
+        {
+            "name": "activate_menu_item",
+            "description": "Activate a global app-menu item from get_app_state. Uses DBusMenu/GMenu when the app exposes a menu model; this is independent of AT-SPI menu roles.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema({"app": app, "menu_index": menu_index}, ["app", "menu_index"]),
         },
         {
             "name": "scroll",
@@ -591,6 +604,25 @@ def run_capture(command: str, args: list[str], *, timeout: float = 5.0) -> tuple
     if proc.returncode != 0:
         return False, b""
     return True, proc.stdout
+
+
+def busctl_user(args: list[str], *, timeout: float = 2.0) -> tuple[bool, str]:
+    executable = shutil.which("busctl")
+    if not executable:
+        return False, ""
+    try:
+        proc = subprocess.run(
+            [executable, "--user", *args],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=session_environment(),
+            check=False,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return False, ""
+    return proc.returncode == 0, proc.stdout
 
 
 def hyprctl_environment() -> dict[str, str]:
@@ -1015,6 +1047,349 @@ def current_snapshot(app: str) -> dict[str, Any]:
     if snapshot is None:
         snapshot = build_app_snapshot(app)
     return snapshot
+
+
+def ensure_global_menu_backends() -> dict[str, Any]:
+    info: dict[str, Any] = {"kdeAppMenuLoaded": False, "gtkMenuProxyStarted": False, "errors": []}
+    ok, out = busctl_user(["call", "org.kde.kded6", "/kded", "org.kde.kded6", "loadModule", "s", "appmenu"], timeout=1.5)
+    if ok:
+        info["kdeAppMenuLoaded"] = "true" in out.lower() or "b " in out
+    elif out:
+        info["errors"].append(out.strip())
+    systemctl = shutil.which("systemctl")
+    if systemctl:
+        try:
+            proc = subprocess.run(
+                [systemctl, "--user", "start", "plasma-gmenudbusmenuproxy.service"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=session_environment(),
+                check=False,
+                timeout=1.5,
+            )
+            info["gtkMenuProxyStarted"] = proc.returncode == 0
+        except subprocess.TimeoutExpired:
+            info["errors"].append("plasma-gmenudbusmenuproxy start timed out")
+    return info
+
+
+def dbus_services_for_pid(pid: int) -> list[str]:
+    if pid <= 0:
+        return []
+    ok, out = busctl_user(["list"], timeout=2.0)
+    if not ok:
+        return []
+    services: list[str] = []
+    for line in out.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        try:
+            service_pid = int(parts[1])
+        except ValueError:
+            continue
+        if service_pid == pid and parts[0].startswith(":"):
+            services.append(parts[0])
+    return services
+
+
+def dbus_tree_paths(service: str) -> list[str]:
+    ok, out = busctl_user(["tree", service], timeout=2.0)
+    if not ok:
+        return []
+    paths: list[str] = []
+    for line in out.splitlines():
+        match = re.search(r"(/[A-Za-z0-9_./-]+)", line)
+        if match:
+            paths.append(match.group(1))
+    return paths
+
+
+def glib_variant_to_plain(value: Any) -> Any:
+    try:
+        unpacked = value.unpack()
+    except Exception:
+        try:
+            return value.print_(False)
+        except Exception:
+            return str(value)
+    if isinstance(unpacked, bytes):
+        return unpacked.decode("utf-8", "replace")
+    if isinstance(unpacked, (list, tuple)):
+        return [glib_variant_to_plain(item) for item in unpacked]
+    if isinstance(unpacked, dict):
+        return {str(k): glib_variant_to_plain(v) for k, v in unpacked.items()}
+    return unpacked
+
+
+def dbusmenu_item_property(item: Any, name: str) -> Any:
+    try:
+        value = item.property_get(name)
+    except Exception:
+        return None
+    return glib_variant_to_plain(value)
+
+
+def walk_dbusmenu_items(service: str, object_path: str, *, limit: int = GLOBAL_MENU_LIMIT) -> tuple[list[dict[str, Any]], str]:
+    try:
+        import gi
+
+        gi.require_version("Dbusmenu", "0.4")
+        from gi.repository import Dbusmenu, GLib
+    except Exception as exc:
+        return [], f"Dbusmenu GI unavailable: {exc}"
+
+    try:
+        client = Dbusmenu.Client.new(service, object_path)
+        loop = GLib.MainLoop()
+        GLib.timeout_add(350, lambda: (loop.quit(), False)[1])
+        loop.run()
+        root = client.get_root()
+    except Exception as exc:
+        return [], str(exc)
+    if root is None:
+        return [], "DBusMenu root is empty"
+
+    records: list[dict[str, Any]] = []
+
+    def walk(item: Any, path: list[int], depth: int) -> None:
+        if len(records) >= limit:
+            return
+        label = str(dbusmenu_item_property(item, "label") or "").replace("_", "").strip()
+        enabled = dbusmenu_item_property(item, "enabled")
+        visible = dbusmenu_item_property(item, "visible")
+        item_type = dbusmenu_item_property(item, "type")
+        children = list(item.get_children() or [])
+        if label and path:
+            records.append(
+                {
+                    "menuIndex": f"dbusmenu:{len(records)}",
+                    "provider": "dbusmenu",
+                    "service": service,
+                    "objectPath": object_path,
+                    "path": path,
+                    "depth": depth,
+                    "label": label,
+                    "enabled": True if enabled is None else bool(enabled),
+                    "visible": True if visible is None else bool(visible),
+                    "type": item_type or "",
+                    "hasChildren": bool(children),
+                }
+            )
+        for child_index, child in enumerate(children):
+            walk(child, [*path, child_index], depth + 1)
+
+    walk(root, [], 0)
+    return records, ""
+
+
+def gmenu_item_attributes(model: Any, index: int) -> dict[str, Any]:
+    attrs: dict[str, Any] = {}
+    iterator = model.iterate_item_attributes(index)
+    while True:
+        ok, name, value = iterator.get_next()
+        if not ok:
+            break
+        attrs[str(name)] = glib_variant_to_plain(value)
+    return attrs
+
+
+def walk_gmenu_items(service: str, object_path: str, *, limit: int = GLOBAL_MENU_LIMIT) -> tuple[list[dict[str, Any]], str]:
+    try:
+        from gi.repository import Gio, GLib
+    except Exception as exc:
+        return [], f"Gio unavailable: {exc}"
+    try:
+        bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+        model = Gio.DBusMenuModel.get(bus, service, object_path)
+        loop = GLib.MainLoop()
+        GLib.timeout_add(350, lambda: (loop.quit(), False)[1])
+        loop.run()
+    except Exception as exc:
+        return [], str(exc)
+
+    records: list[dict[str, Any]] = []
+
+    def walk(model_obj: Any, path: list[int], depth: int) -> None:
+        if len(records) >= limit:
+            return
+        try:
+            count = int(model_obj.get_n_items())
+        except Exception:
+            return
+        for item_index in range(count):
+            if len(records) >= limit:
+                return
+            attrs = gmenu_item_attributes(model_obj, item_index)
+            label = str(attrs.get("label") or attrs.get("verb-icon") or "").strip()
+            action = str(attrs.get("action") or "")
+            target = attrs.get("target")
+            links: list[tuple[str, Any]] = []
+            iterator = model_obj.iterate_item_links(item_index)
+            while True:
+                ok, name, linked = iterator.get_next()
+                if not ok:
+                    break
+                links.append((str(name), linked))
+            if label or action:
+                records.append(
+                    {
+                        "menuIndex": f"gmenu:{len(records)}",
+                        "provider": "gmenu",
+                        "service": service,
+                        "objectPath": object_path,
+                        "path": [*path, item_index],
+                        "depth": depth,
+                        "label": label or action,
+                        "action": action,
+                        "target": target,
+                        "attributes": attrs,
+                        "hasChildren": bool(links),
+                    }
+                )
+            for _, linked_model in links:
+                walk(linked_model, [*path, item_index], depth + 1)
+
+    walk(model, [], 0)
+    return records, ""
+
+
+def global_menu_for_window(window: dict[str, Any]) -> dict[str, Any]:
+    pid = int(window.get("pid") or 0)
+    backend = ensure_global_menu_backends()
+    services = dbus_services_for_pid(pid)
+    providers: list[dict[str, Any]] = []
+    items: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for service in services:
+        paths = dbus_tree_paths(service)
+        for path in paths:
+            if path == "/com/canonical/dbusmenu" or path.endswith("/dbusmenu"):
+                records, error_text = walk_dbusmenu_items(service, path)
+                providers.append({"provider": "dbusmenu", "service": service, "objectPath": path, "itemCount": len(records)})
+                if error_text:
+                    errors.append(f"{service}{path}: {error_text}")
+                for record in records:
+                    record["menuIndex"] = f"menu:{len(items)}"
+                    items.append(record)
+            elif path.endswith("/menus/menubar"):
+                records, error_text = walk_gmenu_items(service, path)
+                providers.append({"provider": "gmenu", "service": service, "objectPath": path, "itemCount": len(records)})
+                if error_text:
+                    errors.append(f"{service}{path}: {error_text}")
+                for record in records:
+                    record["menuIndex"] = f"menu:{len(items)}"
+                    items.append(record)
+    return {
+        "status": "ok" if providers else "unavailable",
+        "backend": backend,
+        "services": services,
+        "providers": providers,
+        "items": items[:GLOBAL_MENU_LIMIT],
+        "truncated": len(items) > GLOBAL_MENU_LIMIT,
+        "errors": errors[:12],
+    }
+
+
+def find_global_menu_item(snapshot: dict[str, Any], menu_index: str) -> dict[str, Any]:
+    menu = snapshot.get("globalMenu") or {}
+    for item in menu.get("items") or []:
+        if str(item.get("menuIndex") or "") == str(menu_index):
+            return dict(item)
+    raise RuntimeError(f'unknown menu_index "{menu_index}"')
+
+
+def refind_dbusmenu_item(service: str, object_path: str, path: list[int]) -> Any:
+    import gi
+
+    gi.require_version("Dbusmenu", "0.4")
+    from gi.repository import Dbusmenu, GLib
+
+    client = Dbusmenu.Client.new(service, object_path)
+    loop = GLib.MainLoop()
+    GLib.timeout_add(350, lambda: (loop.quit(), False)[1])
+    loop.run()
+    item = client.get_root()
+    if item is None:
+        raise RuntimeError("DBusMenu root is empty")
+    for child_index in path:
+        children = list(item.get_children() or [])
+        if not isinstance(child_index, int) or child_index < 0 or child_index >= len(children):
+            raise RuntimeError("DBusMenu item path no longer exists")
+        item = children[child_index]
+    return item
+
+
+def activate_dbusmenu_item(item_info: dict[str, Any]) -> dict[str, Any]:
+    from gi.repository import GLib
+
+    item = refind_dbusmenu_item(str(item_info.get("service") or ""), str(item_info.get("objectPath") or ""), list(item_info.get("path") or []))
+    item.handle_event("clicked", GLib.Variant("s", ""), int(time.time()))
+    return {"ok": True, "provider": "dbusmenu", "menuIndex": item_info.get("menuIndex"), "label": item_info.get("label")}
+
+
+def gtk_action_candidates_for_menu(item_info: dict[str, Any]) -> list[tuple[str, str]]:
+    action = str(item_info.get("action") or "")
+    if "." in action:
+        namespace, action_name = action.split(".", 1)
+    else:
+        namespace, action_name = "", action
+    object_path = str(item_info.get("objectPath") or "")
+    base_path = object_path.split("/menus/", 1)[0] if "/menus/" in object_path else object_path
+    candidates: list[tuple[str, str]] = []
+    if namespace in {"win", "window"} and base_path:
+        candidates.append((base_path, action_name))
+    if namespace in {"app", "application"}:
+        parts = [part for part in base_path.split("/") if part]
+        if len(parts) >= 2:
+            candidates.append(("/" + "/".join(parts[:2]), action_name))
+        candidates.append((base_path, action_name))
+    if not candidates and base_path:
+        candidates.append((base_path, action_name))
+    return candidates
+
+
+def activate_gmenu_item(item_info: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from gi.repository import Gio, GLib
+    except Exception as exc:
+        raise RuntimeError(f"Gio unavailable: {exc}") from exc
+    action = str(item_info.get("action") or "")
+    if not action:
+        raise RuntimeError("GMenu item has no action to activate")
+    service = str(item_info.get("service") or "")
+    target = item_info.get("target")
+    parameters: list[Any] = []
+    if target is not None:
+        if hasattr(target, "is_of_type"):
+            parameters.append(target)
+        elif isinstance(target, bool):
+            parameters.append(GLib.Variant("b", target))
+        elif isinstance(target, int):
+            parameters.append(GLib.Variant("i", target))
+        elif isinstance(target, str):
+            parameters.append(GLib.Variant("s", target))
+        else:
+            parameters.append(GLib.Variant("s", str(target)))
+    bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    last_error = ""
+    for action_path, action_name in gtk_action_candidates_for_menu(item_info):
+        try:
+            bus.call_sync(
+                service,
+                action_path,
+                "org.gtk.Actions",
+                "Activate",
+                GLib.Variant("(sava{sv})", (action_name, parameters, {})),
+                None,
+                Gio.DBusCallFlags.NONE,
+                1500,
+                None,
+            )
+            return {"ok": True, "provider": "gmenu", "menuIndex": item_info.get("menuIndex"), "label": item_info.get("label"), "action": action}
+        except Exception as exc:
+            last_error = str(exc)
+    raise RuntimeError(last_error or f"could not activate GMenu action {action}")
 
 
 def lookup_element(snapshot: dict[str, Any], element_index: str) -> dict[str, Any]:
@@ -2521,6 +2896,7 @@ def build_app_snapshot(app_query: str) -> dict[str, Any]:
         related_error = ""
     screenshot, png_base64 = screenshot_for_window(window)
     atspi = atspi_snapshot_isolated(window, screenshot)
+    global_menu = global_menu_for_window(window)
     elements = atspi["elements"] if atspi["status"] == "ok" and atspi["elements"] else []
     tree_lines = atspi["treeLines"] if atspi["status"] == "ok" and atspi["treeLines"] else []
     if not elements:
@@ -2548,6 +2924,7 @@ def build_app_snapshot(app_query: str) -> dict[str, Any]:
         "treeLines": tree_lines,
         "elements": elements,
         "accessibility": {k: v for k, v in atspi.items() if k not in {"elements", "treeLines"}},
+        "globalMenu": global_menu,
     }
     snapshot["uiHints"] = ui_hints_for_elements(snapshot, elements)
     if related_error:
@@ -2594,6 +2971,31 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
             )
     elif snapshot.get("relatedWindowsError"):
         lines.extend(["", f"Related windows: unavailable. {snapshot.get('relatedWindowsError')}"])
+    global_menu = snapshot.get("globalMenu") or {}
+    if global_menu.get("providers") or global_menu.get("errors"):
+        lines.extend(["", "Global menu models:"])
+        for provider in global_menu.get("providers") or []:
+            lines.append(
+                "- {0} service={1} path={2} items={3}".format(
+                    provider.get("provider"),
+                    provider.get("service"),
+                    provider.get("objectPath"),
+                    provider.get("itemCount", 0),
+                )
+            )
+        if global_menu.get("errors"):
+            lines.append("- warnings: {0}".format("; ".join(str(item) for item in global_menu.get("errors") or [])))
+        menu_items = [item for item in global_menu.get("items") or [] if item.get("label")]
+        if menu_items:
+            lines.append("Global menu actions:")
+            for item in menu_items[:16]:
+                indent = "  " * min(3, int(item.get("depth") or 0))
+                action = str(item.get("action") or "")
+                suffix = f" action={action}" if action else ""
+                disabled = "" if item.get("enabled", True) else " disabled"
+                lines.append(f"- {indent}{item.get('menuIndex')} {item.get('label')}{suffix}{disabled}")
+        elif global_menu.get("providers"):
+            lines.append("- no menu items were exposed by the provider for this window")
     ui_hints = snapshot.get("uiHints") or {}
     hint_notes = ui_hints.get("notes") or []
     if hint_notes:
@@ -2814,6 +3216,26 @@ def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
     if not atspi_do_action_isolated(snapshot, element, action):
         raise RuntimeError(f"{action} is not a valid secondary action for element")
     return mcp_snapshot_result(build_app_snapshot(app))
+
+
+def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
+    app = str(args.get("app") or "")
+    menu_index = str(args.get("menu_index") or args.get("menuIndex") or "")
+    if not menu_index:
+        raise RuntimeError("activate_menu_item requires menu_index from get_app_state")
+    snapshot = current_snapshot(app)
+    item = find_global_menu_item(snapshot, menu_index)
+    provider = str(item.get("provider") or "")
+    if provider == "dbusmenu":
+        result = activate_dbusmenu_item(item)
+    elif provider == "gmenu":
+        result = activate_gmenu_item(item)
+    else:
+        raise RuntimeError(f"unsupported global menu provider: {provider}")
+    time.sleep(0.12)
+    after = build_app_snapshot(app)
+    after["lastAction"] = result
+    return mcp_snapshot_result(after)
 
 
 def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
@@ -3057,6 +3479,7 @@ SEMANTIC_TOOLS = {
     "double_click": alias_click("left", 2),
     "triple_click": alias_click("left", 3),
     "perform_secondary_action": semantic_perform_secondary_action,
+    "activate_menu_item": semantic_activate_menu_item,
     "scroll": semantic_scroll,
     "drag": semantic_drag,
     "left_click_drag": semantic_drag,
@@ -3119,6 +3542,8 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
             return semantic_paste_text(args)
         if action == "key":
             return semantic_press_key(args)
+        if action == "activate_menu_item":
+            return semantic_activate_menu_item(args)
 
     if action == "get_cursor_position":
         return tool_get_cursor_position(args)
