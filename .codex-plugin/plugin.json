@@ -1,6 +1,6 @@
 {
   "name": "hypr-agent-protal",
-  "version": "0.3.18",
+  "version": "0.3.19",
   "description": "hypr-agent-protal MCP only. Hyprland background screenshot, input, clipboard, browser/Chromium control, app-state, and visible agent cursor bridge. Do not use Browser MCP when the user explicitly asks for hypr-agent-protal. Do not use the obsolete hyprcum server.",
   "mcpServers": "./.mcp.json",
   "interface": {
@@ -9,6 +9,6 @@
     "developerName": "wilf",
     "category": "Developer Tools",
     "capabilities": ["mcp", "computer-use"],
-    "defaultPrompt": "Use only the hypr-agent-protal MCP server/namespace; do not use Browser MCP when the user explicitly asks for hypr-agent-protal, and do not use obsolete hyprcum. If the user asks to open/launch a new app/window, call launch_app/open_app first even if an existing app is running. For Chromium/Chrome browser tasks use launch_app with app=chromium, url, and new_window=true. Then call get_app_state or screenshot with app. Prefer element_index or screenshot/window-relative coordinates. For multiline, tabular, CSV/TSV, Unicode-heavy, or long text, use paste_text instead of repeated type_text/key actions. Use global target/x/y only as a low-level computer fallback. Shortcut inputs may be key, keys, modifiers, or keycode. Read uiHints before acting on menus/tabs/toolbars: an element with controlType=menu is not a tab/ribbon page, even if the visible label matches; if a requested tab is not exposed as a tab element, click the visible tab label using screenshot/window-relative coordinates and refresh get_app_state. Do not use app-specific heuristics; refresh app state and act on visible current elements."
+    "defaultPrompt": "Use only the hypr-agent-protal MCP server/namespace; do not use Browser MCP when the user explicitly asks for hypr-agent-protal, and do not use obsolete hyprcum. Unless the user explicitly asks to open/launch/create a new app/window/instance, call list_apps first and reuse an existing matching app/window. If an app launch/open is requested, call launch_app/open_app; it reuses existing windows by default, and you should set reuse_existing=false or new_window=true only when the user explicitly asks for a new instance/window. Then call get_app_state or screenshot with app. Prefer element_index or screenshot/window-relative coordinates. For multiline, tabular, CSV/TSV, Unicode-heavy, or long text, use paste_text instead of repeated type_text/key actions. Use global target/x/y only as a low-level computer fallback. Shortcut inputs may be key, keys, modifiers, or keycode. Read uiHints before acting on menus/tabs/toolbars: an element with controlType=menu is not a tab/ribbon page, even if the visible label matches; if a requested tab is not exposed as a tab element, click the visible tab label using screenshot/window-relative coordinates and refresh get_app_state. Do not use app-specific heuristics; refresh app state and act on visible current elements."
   }
 }

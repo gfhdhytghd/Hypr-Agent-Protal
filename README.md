@@ -54,10 +54,13 @@ Recommended agent workflow:
 
 1. If the user explicitly asks for `hypr-agent-protal`, do not use Browser MCP
    or the old `hyprcum` namespace.
-2. If the user asks to open, launch, or create a new app/window, call
-   `launch_app` or `open_app` first, even when another instance is already
-   running.
-3. Otherwise call `list_apps` first and select the target app/window.
+2. Unless the user explicitly asks to open, launch, create, or use a new
+   app/window/instance, call `list_apps` first and select an existing matching
+   target.
+3. If the user asks to open or launch an app, call `launch_app` or `open_app`.
+   These tools reuse existing matching windows by default. Set
+   `reuse_existing=false` or `new_window=true` only when the user explicitly
+   asks for a new instance/window.
 4. If the requested app is not in `list_apps`, call `launch_app` or `open_app`.
    Do not guess a shell command outside the MCP tool. The launcher uses
    `hyprctl dispatch exec`, waits for the Hyprland window, and returns a
@@ -96,10 +99,11 @@ Chromium/Chrome/Electron-like launches also get
 directly, use for example:
 
 ```json
-{"app": "chromium", "url": "https://example.com", "new_window": true}
+{"app": "chromium", "url": "https://example.com", "reuse_existing": false, "new_window": true}
 ```
 
-For browser or app-control tasks, the intended sequence is `launch_app`,
+For browser or app-control tasks, reuse an existing matching window unless the
+user asked for a new one. The intended sequence is `list_apps` or `launch_app`,
 `get_app_state`, then element-index actions where possible. Refresh
 `get_app_state` after navigation or major UI changes, and use screenshot/window
 coordinates only when the accessibility tree is missing or ambiguous.
@@ -174,7 +178,7 @@ The compatibility `computer` tool still exposes these lower-level actions:
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
 - `doctor`: reports AT-SPI/session diagnostics and target accessibility environment hints.
-- `launch`, `launch_app`, `open_app`: launches an app from the compatibility `computer` tool using the same accessibility environment and Chromium/Electron flags as the direct `launch_app` tool.
+- `launch`, `launch_app`, `open_app`: opens an app from the compatibility `computer` tool using the same accessibility environment and Chromium/Electron flags as the direct `launch_app` tool. Existing matching windows are reused by default; pass `reuse_existing=false` only for an explicitly requested new instance.
 - Compatibility action aliases inside `computer`: `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `left_click_drag`, and `get_cursor_position`.
 
 The command-line bridge is also usable directly:

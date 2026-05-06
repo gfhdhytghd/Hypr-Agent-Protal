@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.18"
+SERVER_VERSION = "0.3.19"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -108,7 +108,7 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "args": {"type": "array", "items": {"type": "string"}, "description": "Additional launch arguments."},
         "url": {"type": "string", "description": "URL or file target to pass to a launched app, usually with new_window for browsers."},
         "new_window": {"type": "boolean", "default": True, "description": "For browser launches, request a new window and use about:blank when no URL is supplied."},
-        "reuse_existing": {"type": "boolean", "default": False, "description": "For launch/open_app, return an already running matching app instead of forcing a new launch."},
+        "reuse_existing": {"type": "boolean", "default": True, "description": "For launch/open_app, return an already running matching app instead of forcing a new launch. Set false only when the user explicitly asks for a new instance/window."},
         "timeout": {"type": "number", "description": "Seconds to wait for a launched app window to appear."},
         "target": {
             "type": "string",
@@ -251,8 +251,8 @@ def tool_definitions() -> list[dict[str, Any]]:
             "command": string_property("Full command line to launch. Prefer app unless custom arguments are needed."),
             "args": {"type": "array", "items": {"type": "string"}, "description": "Additional command arguments."},
             "url": string_property("Optional URL or file target to pass to the launched app."),
-            "new_window": {"type": "boolean", "default": True, "description": "For browsers, request a new window and open about:blank when no URL is supplied."},
-            "reuse_existing": {"type": "boolean", "default": False, "description": "Return an already running matching app instead of launching another copy."},
+            "new_window": {"type": "boolean", "default": True, "description": "For browsers, request a new window and open about:blank when no URL is supplied. Use only when launching a new browser window is intended."},
+            "reuse_existing": {"type": "boolean", "default": True, "description": "Return an already running matching app instead of launching another copy. Set false only when the user explicitly asks for a new instance/window."},
             "timeout": number_property("Seconds to wait for a Hyprland window to appear. Defaults to 8."),
         }
     )
@@ -283,13 +283,13 @@ def tool_definitions() -> list[dict[str, Any]]:
         },
         {
             "name": "list_apps",
-            "description": "List running Hyprland apps/windows available to hypr-agent-protal. Start here before choosing a target app. If the user asks for a new app/window, call launch_app/open_app instead of reusing an existing app.",
+            "description": "List running Hyprland apps/windows available to hypr-agent-protal. Start here before choosing a target app unless the user explicitly asks to launch a new app/window.",
             "annotations": READ_ONLY_ANNOTATIONS,
             "inputSchema": object_schema({}),
         },
         {
             "name": "launch_app",
-            "description": "Launch an app through Hyprland and return the matching window selector. Use this when the user asks to open/launch a new app/window, even if another instance already exists. For browser tasks, launch Chromium/Chrome with url/new_window here instead of Browser MCP.",
+            "description": "Open or launch an app through Hyprland and return a window selector. By default this reuses an already running matching window; set reuse_existing=false only when the user explicitly asks for a new instance/window. For browser tasks, use this instead of Browser MCP only when an app launch/open is requested.",
             "annotations": LAUNCH_ANNOTATIONS,
             "inputSchema": launch_schema,
         },
@@ -2625,6 +2625,8 @@ def tool_list_apps(_: dict[str, Any]) -> dict[str, Any]:
 def tool_launch_app(args: dict[str, Any]) -> dict[str, Any]:
     parts, match_query = launch_parts(args)
     reuse_existing = args.get("reuse_existing")
+    if not isinstance(reuse_existing, bool):
+        reuse_existing = True
     timeout_value = args.get("timeout", 8)
     timeout = float(timeout_value) if isinstance(timeout_value, (int, float)) else 8.0
 

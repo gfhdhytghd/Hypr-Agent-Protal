@@ -80,12 +80,13 @@ def main() -> int:
         "wait",
     }
     assert set(tools_by_name) == expected_tools
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.18"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.19"
     actions = set(tools_by_name["computer"]["inputSchema"]["properties"]["action"]["enum"])
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "doctor", "launch", "launch_app", "open_app", "get_cursor_position", "left_click", "left_click_drag", "hover"]:
         assert action in actions
     assert tools_by_name["launch_app"]["inputSchema"]["properties"]["url"]["type"] == "string"
     assert tools_by_name["launch_app"]["inputSchema"]["properties"]["new_window"]["default"] is True
+    assert tools_by_name["launch_app"]["inputSchema"]["properties"]["reuse_existing"]["default"] is True
     assert tools_by_name["computer"]["inputSchema"]["properties"]["coordinate"]["minItems"] == 2
     assert "window" in tools_by_name["computer"]["inputSchema"]["properties"]["coordinate_space"]["enum"]
     assert tools_by_name["computer"]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
