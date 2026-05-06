@@ -141,10 +141,11 @@ void blendTexturePixel(std::vector<uint8_t>& pixels, int x, int y, const Rgba& c
         return;
     }
 
+    // Hyprland renders textures with premultiplied-alpha blending.
     const auto toByte = [](double value) { return static_cast<uint8_t>(std::lround(std::clamp(value, 0.0, 1.0) * 255.0)); };
-    pixels[index] = toByte((color.r * srcA + dstR * dstA * (1.0 - srcA)) / outA);
-    pixels[index + 1] = toByte((color.g * srcA + dstG * dstA * (1.0 - srcA)) / outA);
-    pixels[index + 2] = toByte((color.b * srcA + dstB * dstA * (1.0 - srcA)) / outA);
+    pixels[index] = toByte(color.r * srcA + dstR * (1.0 - srcA));
+    pixels[index + 1] = toByte(color.g * srcA + dstG * (1.0 - srcA));
+    pixels[index + 2] = toByte(color.b * srcA + dstB * (1.0 - srcA));
     pixels[index + 3] = toByte(outA);
 }
 
@@ -1448,7 +1449,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.2.5",
+        .version = "0.2.6",
     };
 }
 
