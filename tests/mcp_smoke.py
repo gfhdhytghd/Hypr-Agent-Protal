@@ -53,6 +53,9 @@ def main() -> int:
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait"]:
         assert action in actions
     assert tools[0]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
+    assert "keys" in tools[0]["inputSchema"]["properties"]["method"]["enum"]
+    assert tools[0]["inputSchema"]["properties"]["prefer_related"]["type"] == "boolean"
+    assert tools[0]["inputSchema"]["properties"]["restore_clipboard"]["type"] == "boolean"
     assert tools[0]["inputSchema"]["properties"]["related_to"]["type"] == "string"
     assert "begin" in tools[0]["inputSchema"]["properties"]["session_action"]["enum"]
     return 0

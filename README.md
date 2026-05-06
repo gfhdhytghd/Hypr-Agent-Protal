@@ -51,7 +51,9 @@ The MCP server exposes one tool named `computer` with these actions:
 - `scroll`: sends wheel axis events to a target window.
 - `drag`: presses, moves, and releases on the target window.
 - `key`: sends a shortcut such as `ctrl+v`, `enter`, or `escape` to a target window. It also accepts raw evdev keycodes through `keycode` for ydotool-style fallback.
-- `type`, `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
+- `type`: sends text to the target input. Use `method` values `auto`, `keys`, or `paste`; by default it types short ASCII text as key events and uses clipboard paste for Unicode or longer text.
+- `paste_text`, `paste_file`, `paste_image`: writes clipboard data and sends a background paste shortcut to the target window.
+- Text paste actions prefer same-process XWayland popup windows, such as WeChat search results, and restore the previous text clipboard after paste when possible.
 - `copy_text`: writes text to the clipboard without sending input.
 - `session`: begins, syncs, or ends a related-window workspace guard session. Use `session_action` values `begin`, `sync`, or `end`.
 - `wait`: sleeps briefly between UI actions.
