@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.29"
+SERVER_VERSION = "0.3.30"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
@@ -24,6 +24,7 @@ _ATSPI_INIT_ERROR: str | None | bool = None
 _ATSPI: Any = None
 ATSPI_CHILD_ENV = "HYPR_AGENT_PROTAL_ATSPI_CHILD"
 ATSPI_CHILD_MODES = {"--atspi-probe", "--atspi-snapshot", "--atspi-action"}
+ELEMENT_CLICK_MODE_ENV = "HYPR_AGENT_PROTAL_ELEMENT_CLICK_MODE"
 SESSION_ENV_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "WAYLAND_DISPLAY", "DISPLAY", "HYPRLAND_INSTANCE_SIGNATURE")
 A11Y_LAUNCH_ENV = {
     "NO_AT_BRIDGE": "0",
@@ -148,6 +149,12 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         "scroll_direction": {"type": "string", "enum": ["up", "down", "left", "right"], "description": "Compatibility scroll direction."},
         "scroll_amount": {"type": "number", "description": "Compatibility scroll tick amount."},
         "button": {"type": "string", "enum": ["left", "right", "middle", "side", "extra"], "default": "left"},
+        "element_click_mode": {
+            "type": "string",
+            "enum": ["pointer", "auto", "atspi"],
+            "default": "pointer",
+            "description": "For element_index click actions: pointer converts the element frame to screenshot coordinates and sends native pointer input; auto tries AT-SPI then pointer; atspi requires an AT-SPI action.",
+        },
         "key": {"type": "string", "description": "Key name or shortcut for key actions, for example enter, escape, v, f5, alt+left."},
         "keycode": {"type": "integer", "description": "Raw evdev keycode for key actions, ydotool-style."},
         "keys": {"type": "string", "description": "Shortcut string for key actions, for example ctrl+v or alt+tab."},
@@ -248,6 +255,15 @@ def coordinate_space_property(*, include_global: bool = False) -> dict[str, Any]
     }
 
 
+def element_click_mode_property() -> dict[str, Any]:
+    return {
+        "type": "string",
+        "enum": ["pointer", "auto", "atspi"],
+        "default": "pointer",
+        "description": "For element_index clicks: pointer uses the element frame center and native pointer input; auto tries AT-SPI then pointer; atspi requires an AT-SPI action.",
+    }
+
+
 READ_ONLY_ANNOTATIONS = {"readOnlyHint": True}
 ACTION_ANNOTATIONS = {"destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
 LAUNCH_ANNOTATIONS = {"destructiveHint": False, "idempotentHint": False, "openWorldHint": True}
@@ -279,6 +295,7 @@ def tool_definitions() -> list[dict[str, Any]]:
         "x": number_property("X coordinate in coordinate_space."),
         "y": number_property("Y coordinate in coordinate_space."),
         "coordinate_space": coordinate_space_property(),
+        "element_click_mode": element_click_mode_property(),
     }
     screenshot_props = {
         "app": app,
@@ -2408,6 +2425,26 @@ def element_has_primary_atspi_action(element: dict[str, Any]) -> bool:
     return False
 
 
+def element_click_mode(args: dict[str, Any]) -> str:
+    raw = args.get("element_click_mode")
+    if raw is None:
+        raw = os.environ.get(ELEMENT_CLICK_MODE_ENV, "pointer")
+    mode = normalize(raw).replace("_", "-")
+    aliases = {
+        "native": "pointer",
+        "coordinate": "pointer",
+        "coordinates": "pointer",
+        "coords": "pointer",
+        "pointer-first": "pointer",
+        "atspi-first": "auto",
+        "semantic": "atspi",
+    }
+    mode = aliases.get(mode, mode)
+    if mode not in {"pointer", "auto", "atspi"}:
+        return "pointer"
+    return mode
+
+
 def element_atspi_actions(element: dict[str, Any]) -> set[str]:
     if element.get("source") != "atspi":
         return set()
@@ -3454,10 +3491,18 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
         x, y = point
         coordinate_space = args.get("coordinate_space") or "screenshot"
 
-    if element is not None and button == "left" and click_count == 1 and element_has_primary_atspi_action(element):
-        control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
-        if atspi_do_action_isolated(snapshot, element):
-            return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+    if element is not None and button == "left" and click_count == 1:
+        mode = element_click_mode(args)
+        if mode in {"auto", "atspi"}:
+            if not element_has_primary_atspi_action(element):
+                if mode == "atspi":
+                    raise RuntimeError("element has no AT-SPI action; use element_click_mode=pointer for native pointer click")
+            else:
+                control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
+                if atspi_do_action_isolated(snapshot, element):
+                    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+                if mode == "atspi":
+                    raise RuntimeError("AT-SPI element action failed; use element_click_mode=pointer for native pointer click")
 
     global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
     action = "doubleclick" if click_count > 1 and button == "left" else "click"

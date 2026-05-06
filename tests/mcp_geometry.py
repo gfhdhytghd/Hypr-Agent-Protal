@@ -127,6 +127,9 @@ def main() -> int:
     assert mcp.atspi_preferred_action_index(DummyActionNode(["showContextMenu", "jump"])) == 1
     assert mcp.element_has_primary_atspi_action({"source": "atspi", "actions": ["jump"]}) is True
     assert mcp.element_has_primary_atspi_action({"source": "synthetic", "actions": ["jump"]}) is False
+    assert mcp.element_click_mode({}) == "pointer"
+    assert mcp.element_click_mode({"element_click_mode": "auto"}) == "auto"
+    assert mcp.element_click_mode({"element_click_mode": "semantic"}) == "atspi"
     assert mcp.scroll_action_for_direction("down") == "scrollDown"
     assert mcp.element_supports_scroll_direction({"source": "atspi", "actions": ["scrollDown"]}, "down") is True
 

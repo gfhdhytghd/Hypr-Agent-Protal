@@ -83,7 +83,7 @@ def main() -> int:
         "wait_for_close",
     }
     assert set(tools_by_name) == expected_tools
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.29"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.30"
     actions = set(tools_by_name["computer"]["inputSchema"]["properties"]["action"]["enum"])
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "wait_for_window", "wait_for_close", "doctor", "launch", "launch_app", "open_app", "get_cursor_position", "activate_menu_item", "left_click", "left_click_drag", "hover"]:
         assert action in actions
@@ -113,6 +113,9 @@ def main() -> int:
     assert tools_by_name["click"]["inputSchema"]["properties"]["name"]["type"] == "string"
     assert tools_by_name["click"]["inputSchema"]["properties"]["coordinate"]["minItems"] == 2
     assert "window" in tools_by_name["click"]["inputSchema"]["properties"]["coordinate_space"]["enum"]
+    assert tools_by_name["click"]["inputSchema"]["properties"]["element_click_mode"]["default"] == "pointer"
+    assert "atspi" in tools_by_name["click"]["inputSchema"]["properties"]["element_click_mode"]["enum"]
+    assert tools_by_name["computer"]["inputSchema"]["properties"]["element_click_mode"]["default"] == "pointer"
     assert tools_by_name["drag"]["inputSchema"]["required"] == ["app"]
     assert tools_by_name["left_click_drag"]["inputSchema"]["required"] == ["app", "start_coordinate", "coordinate"]
     assert tools_by_name["press_key"]["inputSchema"]["properties"]["key"]["type"] == "string"

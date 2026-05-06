@@ -75,8 +75,13 @@ Recommended agent workflow:
    `continuedWithTarget` instead of retrying the closed popup target.
    When an action is expected to open or close a dialog/window, use
    `wait_for_window` or `wait_for_close` rather than acting on a stale snapshot.
-7. Prefer `element_index` from `get_app_state`. When coordinates are needed,
-   use `coordinate_space=screenshot` with screenshot pixels, or
+7. Prefer `element_index` from `get_app_state`. Element-index clicks use the
+   element's visible screenshot center and native pointer input by default, so
+   they behave like real background clicks and show the visible agent cursor.
+   Set `element_click_mode=auto` or
+   `HYPR_AGENT_PROTAL_ELEMENT_CLICK_MODE=auto` only when you intentionally want
+   to try AT-SPI action activation before the pointer fallback. When
+   coordinates are needed, use `coordinate_space=screenshot` with screenshot pixels, or
    `coordinate_space=window` with target-window-relative logical coordinates.
 8. Use `paste_text` for multiline, tabular, CSV/TSV, Unicode-heavy, or long
    text. Do not enter datasets with repeated `type_text`/`key` calls unless
@@ -138,7 +143,7 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 - Popup/dialog close handling: if an action such as OK, Finish, Cancel, Enter, or Escape closes the current popup target, semantic action tools return the surviving related/root app state with `lastAction.targetClosed=true` and an `ACTION RESULT` notice instead of surfacing the closed popup as `appNotFound`.
 - Window lifecycle waits: `wait_for_window` waits for a new or same-process related popup/dialog and returns that target's app state. `wait_for_close` waits until a target disappears and can return the surviving `related_to` root state. Semantic action results include `lastAction.windowDelta.opened/closed` when the related window set changes.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
-- `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`, `activate_menu_item`: operate on the last app-state snapshot by `element_index` or `menu_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
+- `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`, `activate_menu_item`: operate on the last app-state snapshot by `element_index` or `menu_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. For `click`, `element_index` is converted to the visible element center and sent through native pointer input by default. Use `element_click_mode=auto` or `HYPR_AGENT_PROTAL_ELEMENT_CLICK_MODE=auto` to try AT-SPI activation before pointer fallback, or `element_click_mode=atspi` to require AT-SPI activation. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, `wait`, `wait_for_window`, and `wait_for_close`.
 
 The app-state coordinate contract hides Hyprland global logical coordinates from semantic tools. Pass `coordinate_space=screenshot` for screenshot pixels from `get_app_state`, or `coordinate_space=window` for logical coordinates relative to the captured target window. `coordinate: [x, y]` is accepted by click/hover/scroll aliases; `start_coordinate` plus `coordinate` is accepted by drag aliases. The MCP bridge converts these values to the compositor coordinates internally before dispatch. Compatibility calls that provide `target` instead of `app` use the same target-relative conversion unless `coordinate_space=global` is explicit.
