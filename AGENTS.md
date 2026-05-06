@@ -9,6 +9,7 @@ For browser/app-control tasks:
 3. Use the returned `target` selector, usually `address:0x...`, for the rest of the task.
 4. Call `get_app_state` after launch and after each navigation/action that changes the page.
 5. If `get_app_state` reports `ACTIVE RELATED POPUP DETECTED`, switch to the shown `target=address:0x...` and operate that popup/dialog first. The popup screenshot is attached before the root-window screenshot.
+   If an action closes the popup/dialog and the returned state reports `ACTION RESULT` / `lastAction.targetClosed=true`, continue from the returned `continuedWithTarget` instead of retrying the closed popup target.
 6. Prefer `element_index` actions from the app-state tree. Use screenshot coordinates only when the tree is missing or ambiguous.
 7. Use `paste_text` for multiline, tabular, CSV/TSV, Unicode-heavy, or long text. Do not enter datasets with repeated `type_text`/`key` calls unless paste is unavailable. On grid-like targets, bulk paste exits cell edit mode before pasting so TSV/CSV expands into cells.
 8. For shortcuts, use `press_key`/`key` with `key`, `keys`, `modifiers`, or `keycode`; examples: `enter`, `alt+left`, `{"key":"left","modifiers":"alt"}`.

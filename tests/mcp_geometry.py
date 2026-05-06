@@ -195,6 +195,49 @@ def main() -> int:
     rendered_popup = mcp.render_snapshot_text(popup_snapshot)
     assert "ACTIVE RELATED POPUP DETECTED:" in rendered_popup
     assert "address:0xpopup" in rendered_popup
+    original_build_app_snapshot = mcp.build_app_snapshot
+    original_list_hypr_windows = mcp.list_hypr_windows
+    try:
+        before_popup = {
+            "target": "address:0xpopup",
+            "app": {"pid": 1234},
+            "relatedWindows": [
+                {
+                    "address": "0xroot",
+                    "hyprAgentProtalRelation": "related",
+                    "hyprAgentProtalWindowKind": "related",
+                    "mapped": True,
+                    "hidden": False,
+                    "floating": False,
+                }
+            ],
+        }
+
+        def fake_build_app_snapshot(app: str) -> dict:
+            if app == "address:0xpopup":
+                raise RuntimeError('appNotFound("address:0xpopup")')
+            assert app == "address:0xroot"
+            return {
+                "app": {"name": "root", "bundleIdentifier": "root", "pid": 1234},
+                "window": {"address": "0xroot", "class": "root", "workspace": {"name": "1"}, "xwayland": False},
+                "target": "address:0xroot",
+                "windowTitle": "Root",
+                "treeLines": [],
+                "uiHints": {},
+                "accessibility": {"status": "ok"},
+            }
+
+        mcp.build_app_snapshot = fake_build_app_snapshot
+        mcp.list_hypr_windows = lambda: []
+        after_closed = mcp.snapshot_after_action("address:0xpopup", before_popup)
+        assert after_closed["target"] == "address:0xroot"
+        assert after_closed["lastAction"]["targetClosed"] is True
+        rendered_after_closed = mcp.render_snapshot_text(after_closed)
+        assert "ACTION RESULT:" in rendered_after_closed
+        assert "address:0xpopup closed" in rendered_after_closed
+    finally:
+        mcp.build_app_snapshot = original_build_app_snapshot
+        mcp.list_hypr_windows = original_list_hypr_windows
     gmenu_action = {"objectPath": "/org/example/window/1/menus/menubar", "action": "win.insert-chart"}
     assert mcp.gtk_action_candidates_for_menu(gmenu_action)[0] == ("/org/example/window/1", "insert-chart")
     assert mcp.text_is_bulk_paste_candidate("A\tB\n1\t2") is True

@@ -70,6 +70,9 @@ Recommended agent workflow:
 6. If `get_app_state` reports `ACTIVE RELATED POPUP DETECTED`, operate the
    shown `target=address:0x...` popup/dialog before continuing with the root
    window. The popup screenshot is attached before the root-window screenshot.
+   If an action closes that popup/dialog, the returned state may report
+   `ACTION RESULT` with `targetClosed=true`; continue from the returned
+   `continuedWithTarget` instead of retrying the closed popup target.
 7. Prefer `element_index` from `get_app_state`. When coordinates are needed,
    use `coordinate_space=screenshot` with screenshot pixels, or
    `coordinate_space=window` with target-window-relative logical coordinates.
@@ -130,6 +133,7 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 - `launch_app` / `open_app`: starts apps through Hyprland, applies accessibility environment/flags, waits for a new window, and returns its selector.
 - `get_app_state`: captures an unoccluded screenshot for a selected app/window and returns a semantic tree plus `uiHints` for menus, tabs, and toolbars. AT-SPI nodes are included when the target exposes accessibility; otherwise the result still includes screenshot metadata and synthetic window elements for coordinate fallback. AT-SPI frames are normalized to screenshot pixels, including target-window captures that contain compositor shadow/border margins. When the target process exposes DBusMenu or GMenu app-menu models, the result also includes `globalMenu` providers and `menu_index` actions.
 - Active related popups/dialogs: when a same-process popup or floating dialog is open for the target, `get_app_state` adds an `ACTIVE RELATED POPUP DETECTED` notice, `activeRelatedTarget`, and an extra popup screenshot before the root-window screenshot. Agents should switch to that popup target first.
+- Popup/dialog close handling: if an action such as OK, Finish, Cancel, Enter, or Escape closes the current popup target, semantic action tools return the surviving related/root app state with `lastAction.targetClosed=true` and an `ACTION RESULT` notice instead of surfacing the closed popup as `appNotFound`.
 - `get_cursor_position`: returns the current agent or compositor cursor in monitor-relative coordinates, and in screenshot/window-relative coordinates when `app` is supplied.
 - `click`, `scroll`, `drag`, `type_text`, `paste_text`, `press_key`, `set_value`, `perform_secondary_action`, `activate_menu_item`: operate on the last app-state snapshot by `element_index` or `menu_index` where possible, and fall back to screenshot/window-relative coordinates plus the native background input dispatchers. Use `paste_text` for bulk text and datasets; on grid/table targets it exits cell edit mode before pasting so tabular text can expand into cells. `type_text` is for short literal typing and accepts `method=auto`, `paste`, `keys`, or explicit `atspi`.
 - Compatibility aliases: `read_app_state`, `list_windows`, `open_app`, `screenshot`, `get_screenshot`, `left_click`, `right_click`, `middle_click`, `double_click`, `triple_click`, `hover`, `move_mouse`, `left_click_drag`, `type`, `key`, and `wait`.

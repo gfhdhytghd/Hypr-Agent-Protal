@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.26"
+SERVER_VERSION = "0.3.27"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
@@ -3010,6 +3010,85 @@ def build_app_snapshot(app_query: str) -> dict[str, Any]:
     return snapshot
 
 
+def is_app_not_found_error(exc: Exception) -> bool:
+    return "appNotFound(" in str(exc)
+
+
+def snapshot_target_address(snapshot: dict[str, Any]) -> str:
+    target = str(snapshot.get("target") or "")
+    address = target_address(target)
+    if address:
+        return address
+    window = snapshot.get("window") or {}
+    return normalize(window.get("address"))
+
+
+def fallback_targets_after_target_closed(before: dict[str, Any]) -> list[str]:
+    old_address = snapshot_target_address(before)
+    pid = int((before.get("app") or {}).get("pid") or 0)
+    candidates: list[tuple[int, str]] = []
+    seen: set[str] = set()
+
+    def add_candidate(window: dict[str, Any], score: int) -> None:
+        address = normalize(window.get("address"))
+        if not address or address == old_address or address in seen:
+            return
+        if window.get("hidden", False) or not window.get("mapped", True):
+            return
+        seen.add(address)
+        candidates.append((score, f"address:{address}"))
+
+    for window in before.get("relatedWindows") or []:
+        if not isinstance(window, dict):
+            continue
+        relation = window.get("hyprAgentProtalRelation")
+        if relation not in {"self", "related"}:
+            continue
+        kind = window.get("hyprAgentProtalWindowKind") or ""
+        floating = bool(window.get("floating"))
+        score = 0
+        if relation == "related":
+            score += 1
+        if kind == "popup" or floating:
+            score += 2
+        add_candidate(window, score)
+
+    if pid:
+        for window in list_hypr_windows():
+            if int(window.get("pid") or 0) == pid:
+                add_candidate(window, 10)
+
+    candidates.sort(key=lambda item: item[0])
+    return [target for _, target in candidates]
+
+
+def snapshot_after_action(app: str, before: dict[str, Any], action_result: dict[str, Any] | None = None) -> dict[str, Any]:
+    try:
+        after = build_app_snapshot(app)
+    except Exception as exc:
+        if not is_app_not_found_error(exc):
+            raise
+        errors: list[str] = [str(exc)]
+        for candidate in fallback_targets_after_target_closed(before):
+            try:
+                after = build_app_snapshot(candidate)
+                after["lastAction"] = {
+                    "targetClosed": True,
+                    "previousTarget": before.get("target") or app,
+                    "continuedWithTarget": after.get("target"),
+                    "message": "The previous target closed after the action; continue with this related/root window state.",
+                }
+                if action_result:
+                    after["lastAction"]["result"] = action_result
+                return after
+            except Exception as candidate_exc:
+                errors.append(f"{candidate}: {candidate_exc}")
+        raise RuntimeError("; ".join(errors)) from exc
+    if action_result:
+        after["lastAction"] = action_result
+    return after
+
+
 def render_snapshot_text(snapshot: dict[str, Any]) -> str:
     app = snapshot.get("app") or {}
     window = snapshot.get("window") or {}
@@ -3024,6 +3103,18 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
             bool(window.get("xwayland")),
         ),
     ]
+    last_action = snapshot.get("lastAction") or {}
+    if isinstance(last_action, dict) and last_action.get("targetClosed"):
+        lines.extend(
+            [
+                "",
+                "ACTION RESULT:",
+                "- Previous target {0} closed after the action; continue with {1}.".format(
+                    last_action.get("previousTarget") or "",
+                    last_action.get("continuedWithTarget") or snapshot.get("target") or "",
+                ),
+            ]
+        )
     active_related = snapshot.get("activeRelatedWindow") or {}
     if active_related:
         title = str(active_related.get("title") or active_related.get("initialTitle") or "")
@@ -3278,7 +3369,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
     if element is not None and button == "left" and click_count == 1 and element_has_primary_atspi_action(element):
         control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
         if atspi_do_action_isolated(snapshot, element):
-            return mcp_snapshot_result(build_app_snapshot(app))
+            return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
     global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
     action = "doubleclick" if click_count > 1 and button == "left" else "click"
@@ -3290,7 +3381,7 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
             time.sleep(0.12)
     if action == "doubleclick":
         call_ctl(["pointer", "--json", target, str(global_x), str(global_y), "doubleclick", button])
-    return mcp_snapshot_result(build_app_snapshot(app))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
 
 def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
@@ -3307,7 +3398,7 @@ def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
         control_overlay(snapshot, action=action)
     if not atspi_do_action_isolated(snapshot, element, action):
         raise RuntimeError(f"{action} is not a valid secondary action for element")
-    return mcp_snapshot_result(build_app_snapshot(app))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
 
 def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
@@ -3325,9 +3416,7 @@ def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
     else:
         raise RuntimeError(f"unsupported global menu provider: {provider}")
     time.sleep(0.12)
-    after = build_app_snapshot(app)
-    after["lastAction"] = result
-    return mcp_snapshot_result(after)
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot, result))
 
 
 def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
@@ -3371,7 +3460,7 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"Invalid scroll direction: {direction}")
     try:
         call_ctl(["pointer", "--json", str(snapshot["target"]), str(global_x), str(global_y), "scroll", str(dy), "--dx", str(dx)])
-        return mcp_snapshot_result(build_app_snapshot(app))
+        return mcp_snapshot_result(snapshot_after_action(app, snapshot))
     except Exception:
         if element is None or not element_supports_scroll_direction(element, direction):
             raise
@@ -3381,7 +3470,7 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
             ok = atspi_do_action_isolated(snapshot, element, action_name) or ok
         if not ok:
             raise
-        return mcp_snapshot_result(build_app_snapshot(app))
+        return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
 
 def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
@@ -3396,7 +3485,7 @@ def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
     to_x, to_y = point_to_global(snapshot, end[0], end[1], coordinate_space)
     duration = float(args.get("duration") or 0.2)
     call_ctl(["pointer", "--json", str(snapshot["target"]), str(from_x), str(from_y), "drag", "left", str(to_x), str(to_y), "--duration", str(max(0.0, min(duration, 3.0)))])
-    return mcp_snapshot_result(build_app_snapshot(app))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
 
 def semantic_hover(args: dict[str, Any]) -> dict[str, Any]:
@@ -3405,7 +3494,7 @@ def semantic_hover(args: dict[str, Any]) -> dict[str, Any]:
     x, y = action_point(snapshot, args)
     global_x, global_y = point_to_global(snapshot, x, y, args.get("coordinate_space") or "screenshot")
     call_ctl(["pointer", "--json", str(snapshot["target"]), str(global_x), str(global_y), "move", "left"])
-    return mcp_snapshot_result(build_app_snapshot(app))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
 
 def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
@@ -3417,13 +3506,13 @@ def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
     control_overlay(snapshot, action="type")
     method = args.get("method") if isinstance(args.get("method"), str) else "auto"
     if method == "atspi" and atspi_insert_text_isolated(snapshot, text):
-        return mcp_snapshot_result(build_app_snapshot(app))
+        return mcp_snapshot_result(snapshot_after_action(app, snapshot))
     type_args = dict(args)
     if method == "atspi":
         type_args["method"] = "auto"
     prepare_grid_bulk_paste(snapshot, text)
     type_text(str(snapshot["target"]), text, type_args)
-    return mcp_snapshot_result(build_app_snapshot(app))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
 
 def semantic_paste_text(args: dict[str, Any]) -> dict[str, Any]:
@@ -3469,7 +3558,7 @@ def semantic_press_key(args: dict[str, Any]) -> dict[str, Any]:
         info = keyboard(str(snapshot["target"]), key, modifiers, x, y)
     if info:
         info["repeat"] = min(repeat, 100)
-    return mcp_snapshot_result(build_app_snapshot(app))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot, info if info else None))
 
 
 def semantic_set_value(args: dict[str, Any]) -> dict[str, Any]:
@@ -3486,7 +3575,7 @@ def semantic_set_value(args: dict[str, Any]) -> dict[str, Any]:
         control_overlay(snapshot, action="set_value")
     if not atspi_set_element_value_isolated(snapshot, element, value):
         raise RuntimeError("Cannot set a value for an element that is not settable")
-    return mcp_snapshot_result(build_app_snapshot(app))
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
 
 
 def semantic_wait(args: dict[str, Any]) -> dict[str, Any]:
