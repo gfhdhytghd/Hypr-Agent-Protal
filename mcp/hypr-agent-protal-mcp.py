@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.3"
+SERVER_VERSION = "0.3.4"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 
 _ATSPI_INIT_ERROR: str | None | bool = None
@@ -500,7 +500,7 @@ def error(req_id: Any, code: int, message: str) -> dict[str, Any]:
 
 
 def call_ctl(args: list[str]) -> dict[str, Any]:
-    proc = subprocess.run([str(find_ctl()), *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    proc = subprocess.run([str(find_ctl()), *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=hyprctl_environment(), check=False)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or f"hypr-agent-protalctl exited {proc.returncode}").strip())
     if not proc.stdout.strip():
@@ -544,6 +544,36 @@ def run_capture(command: str, args: list[str], *, timeout: float = 5.0) -> tuple
     if proc.returncode != 0:
         return False, b""
     return True, proc.stdout
+
+
+def hyprctl_environment() -> dict[str, str]:
+    env = os.environ.copy()
+    if not env.get("XDG_RUNTIME_DIR"):
+        env["XDG_RUNTIME_DIR"] = f"/run/user/{os.getuid()}"
+    if env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        return env
+
+    proc = subprocess.run(["hyprctl", "instances", "-j"], text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env, check=False)
+    if proc.returncode == 0 and proc.stdout.strip():
+        try:
+            instances = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            instances = []
+        if instances:
+            wayland_display = env.get("WAYLAND_DISPLAY")
+            matching = [item for item in instances if wayland_display and item.get("wl_socket") == wayland_display]
+            selected = max(matching or instances, key=lambda item: int(item.get("time") or 0))
+            if selected.get("instance"):
+                env["HYPRLAND_INSTANCE_SIGNATURE"] = str(selected["instance"])
+            if not env.get("WAYLAND_DISPLAY") and selected.get("wl_socket"):
+                env["WAYLAND_DISPLAY"] = str(selected["wl_socket"])
+            return env
+
+    runtime_root = pathlib.Path(env["XDG_RUNTIME_DIR"]) / "hypr"
+    sockets = sorted(runtime_root.glob("*/.socket.sock"), key=lambda path: path.stat().st_mtime, reverse=True)
+    if sockets:
+        env["HYPRLAND_INSTANCE_SIGNATURE"] = sockets[0].parent.name
+    return env
 
 
 def result_text(info: dict[str, Any]) -> dict[str, Any]:
@@ -787,7 +817,8 @@ def hyprctl_exec(command: str) -> str:
     hyprctl = shutil.which("hyprctl")
     if not hyprctl:
         raise RuntimeError("hyprctl not found")
-    proc = subprocess.run([hyprctl, "dispatch", "exec", command], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    env = hyprctl_environment()
+    proc = subprocess.run([hyprctl, "dispatch", "exec", command], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or f"hyprctl dispatch exec failed with exit code {proc.returncode}").strip())
     return proc.stdout.strip()
@@ -986,7 +1017,7 @@ def screenshot_for_window(window: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 
 def hyprctl_json(*args: str) -> Any:
-    proc = subprocess.run(["hyprctl", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    proc = subprocess.run(["hyprctl", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=hyprctl_environment(), check=False)
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or f"hyprctl {' '.join(args)} failed").strip())
     return json.loads(proc.stdout or "null")
@@ -2109,6 +2140,7 @@ def alias_click(button: str, click_count: int) -> Any:
 
 
 def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
+    resolved_env = hyprctl_environment()
     diag: dict[str, Any] = {
         "pythonGI": shutil.which("python3") is not None,
         "atspi": {"available": atspi_available(), "error": atspi_init_error()},
@@ -2117,6 +2149,11 @@ def accessibility_diagnostics(target: str | None = None) -> dict[str, Any]:
             "DBUS_SESSION_BUS_ADDRESS": os.environ.get("DBUS_SESSION_BUS_ADDRESS", ""),
             "WAYLAND_DISPLAY": os.environ.get("WAYLAND_DISPLAY", ""),
             "DISPLAY": os.environ.get("DISPLAY", ""),
+        },
+        "hyprland": {
+            "XDG_RUNTIME_DIR": resolved_env.get("XDG_RUNTIME_DIR", ""),
+            "HYPRLAND_INSTANCE_SIGNATURE": resolved_env.get("HYPRLAND_INSTANCE_SIGNATURE", ""),
+            "WAYLAND_DISPLAY": resolved_env.get("WAYLAND_DISPLAY", ""),
         },
         "recommendations": [
             "For Qt apps launched after configuration, set QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1.",
