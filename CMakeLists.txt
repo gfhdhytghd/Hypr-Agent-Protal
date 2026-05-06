@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(HyprAgentProtal VERSION "0.3.27")
+project(HyprAgentProtal VERSION "0.3.28")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

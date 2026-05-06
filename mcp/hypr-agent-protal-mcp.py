@@ -15,7 +15,7 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.27"
+SERVER_VERSION = "0.3.28"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
@@ -90,6 +90,8 @@ COMPUTER_SCHEMA: dict[str, Any] = {
                 "paste_image",
                 "session",
                 "wait",
+                "wait_for_window",
+                "wait_for_close",
                 "doctor",
                 "launch",
                 "launch_app",
@@ -189,6 +191,8 @@ COMPUTER_SCHEMA: dict[str, Any] = {
         },
         "path": {"type": "string", "description": "Filesystem path for paste_file/paste_image actions."},
         "duration": {"type": "number", "description": "Duration in seconds for wait or drag pacing."},
+        "title": {"type": "string", "description": "Window title substring for wait_for_window."},
+        "class": {"type": "string", "description": "Window class substring for wait_for_window."},
         "session_action": {
             "type": "string",
             "enum": ["begin", "sync", "end"],
@@ -548,6 +552,33 @@ def tool_definitions() -> list[dict[str, Any]]:
             "description": "Compatibility alias: wait for a short duration.",
             "annotations": ACTION_ANNOTATIONS,
             "inputSchema": object_schema({"duration": number_property("Seconds to wait. Defaults to 1.")}),
+        },
+        {
+            "name": "wait_for_window",
+            "description": "Wait for a Hyprland window or same-process related popup/dialog to appear, then return its app state. Use after actions expected to open dialogs or new windows.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "related_to": string_property("Root app/window selector whose related popup/dialog should appear."),
+                    "title": string_property("Window title substring to wait for."),
+                    "class": string_property("Window class substring to wait for."),
+                    "timeout": number_property("Seconds to wait. Defaults to 5."),
+                }
+            ),
+        },
+        {
+            "name": "wait_for_close",
+            "description": "Wait for a target window/dialog to close. If related_to is provided, return the surviving related/root app state.",
+            "annotations": ACTION_ANNOTATIONS,
+            "inputSchema": object_schema(
+                {
+                    "app": app,
+                    "target": string_property("Target window selector to wait for close, for example address:0x1234."),
+                    "related_to": string_property("Root app/window selector to return after the target closes."),
+                    "timeout": number_property("Seconds to wait. Defaults to 5."),
+                }
+            ),
         },
     ]
 
@@ -3062,6 +3093,49 @@ def fallback_targets_after_target_closed(before: dict[str, Any]) -> list[str]:
     return [target for _, target in candidates]
 
 
+def compact_window_info(window: dict[str, Any]) -> dict[str, Any]:
+    address = str(window.get("address") or "")
+    workspace = window.get("workspace") or {}
+    return {
+        "target": f"address:{address}" if address else "",
+        "address": address,
+        "title": str(window.get("title") or window.get("initialTitle") or ""),
+        "class": str(window.get("class") or window.get("initialClass") or ""),
+        "pid": int(window.get("pid") or 0),
+        "kind": window.get("hyprAgentProtalWindowKind") or "",
+        "relation": window.get("hyprAgentProtalRelation") or "",
+        "workspace": workspace.get("name", workspace.get("id", "")),
+    }
+
+
+def window_delta(before_windows: list[dict[str, Any]], after_windows: list[dict[str, Any]]) -> dict[str, Any]:
+    before = {normalize(window.get("address")): window for window in before_windows if isinstance(window, dict) and window.get("address")}
+    after = {normalize(window.get("address")): window for window in after_windows if isinstance(window, dict) and window.get("address")}
+    opened = [compact_window_info(after[address]) for address in sorted(after.keys() - before.keys())]
+    closed = [compact_window_info(before[address]) for address in sorted(before.keys() - after.keys())]
+    result: dict[str, Any] = {}
+    if opened:
+        result["opened"] = opened
+    if closed:
+        result["closed"] = closed
+    return result
+
+
+def merge_last_action(after: dict[str, Any], before: dict[str, Any], action_result: dict[str, Any] | None = None) -> None:
+    delta = window_delta(
+        [item for item in before.get("relatedWindows") or [] if isinstance(item, dict)],
+        [item for item in after.get("relatedWindows") or [] if isinstance(item, dict)],
+    )
+    if not action_result and not delta:
+        return
+    info: dict[str, Any] = dict(action_result or {})
+    if delta:
+        info["windowDelta"] = delta
+        if delta.get("opened"):
+            info["message"] = "The action changed the related window set; inspect opened/closed windows before continuing."
+    after["lastAction"] = info
+
+
 def snapshot_after_action(app: str, before: dict[str, Any], action_result: dict[str, Any] | None = None) -> dict[str, Any]:
     try:
         after = build_app_snapshot(app)
@@ -3077,6 +3151,10 @@ def snapshot_after_action(app: str, before: dict[str, Any], action_result: dict[
                     "previousTarget": before.get("target") or app,
                     "continuedWithTarget": after.get("target"),
                     "message": "The previous target closed after the action; continue with this related/root window state.",
+                    "windowDelta": window_delta(
+                        [item for item in before.get("relatedWindows") or [] if isinstance(item, dict)],
+                        [item for item in after.get("relatedWindows") or [] if isinstance(item, dict)],
+                    ),
                 }
                 if action_result:
                     after["lastAction"]["result"] = action_result
@@ -3084,8 +3162,7 @@ def snapshot_after_action(app: str, before: dict[str, Any], action_result: dict[
             except Exception as candidate_exc:
                 errors.append(f"{candidate}: {candidate_exc}")
         raise RuntimeError("; ".join(errors)) from exc
-    if action_result:
-        after["lastAction"] = action_result
+    merge_last_action(after, before, action_result)
     return after
 
 
@@ -3115,6 +3192,17 @@ def render_snapshot_text(snapshot: dict[str, Any]) -> str:
                 ),
             ]
         )
+    if isinstance(last_action, dict) and isinstance(last_action.get("windowDelta"), dict):
+        delta = last_action["windowDelta"]
+        opened = delta.get("opened") or []
+        closed = delta.get("closed") or []
+        if opened or closed:
+            if "ACTION RESULT:" not in lines:
+                lines.extend(["", "ACTION RESULT:"])
+            for item in opened[:6]:
+                lines.append('- opened {0} title="{1}" class={2} kind={3}'.format(item.get("target"), item.get("title"), item.get("class"), item.get("kind")))
+            for item in closed[:6]:
+                lines.append('- closed {0} title="{1}" class={2} kind={3}'.format(item.get("target"), item.get("title"), item.get("class"), item.get("kind")))
     active_related = snapshot.get("activeRelatedWindow") or {}
     if active_related:
         title = str(active_related.get("title") or active_related.get("initialTitle") or "")
@@ -3586,6 +3674,106 @@ def semantic_wait(args: dict[str, Any]) -> dict[str, Any]:
     return result_text({"ok": True, "duration": duration})
 
 
+def window_matches_wait(window: dict[str, Any], args: dict[str, Any]) -> bool:
+    title = normalize(args.get("title"))
+    klass = normalize(args.get("class"))
+    if title:
+        haystack = normalize(f"{window.get('title') or ''} {window.get('initialTitle') or ''}")
+        if title not in haystack:
+            return False
+    if klass:
+        haystack = normalize(f"{window.get('class') or ''} {window.get('initialClass') or ''}")
+        if klass not in haystack:
+            return False
+    if window.get("hidden", False) or not window.get("mapped", True):
+        return False
+    return True
+
+
+def wait_window_candidates(args: dict[str, Any]) -> list[dict[str, Any]]:
+    related_to = args.get("related_to") or args.get("app")
+    if isinstance(related_to, str) and related_to:
+        windows = related_windows_for(related_to)
+        related = [window for window in windows if isinstance(window, dict) and window.get("hyprAgentProtalRelation") == "related"]
+        return [window for window in related if window_matches_wait(window, args)]
+    return [window for window in list_hypr_windows() if window_matches_wait(window, args)]
+
+
+def semantic_wait_for_window(args: dict[str, Any]) -> dict[str, Any]:
+    if not any(isinstance(args.get(key), str) and args.get(key) for key in ("app", "related_to", "title", "class")):
+        raise RuntimeError("wait_for_window requires app, related_to, title, or class")
+    timeout = args.get("timeout", 5)
+    if not isinstance(timeout, (int, float)):
+        timeout = 5
+    deadline = time.monotonic() + max(0.0, min(float(timeout), 30.0))
+    last_error = ""
+    while True:
+        try:
+            candidates = wait_window_candidates(args)
+            if candidates:
+                candidates.sort(
+                    key=lambda window: (
+                        0 if window.get("hyprAgentProtalWindowKind") == "popup" else 1,
+                        int(window.get("focusHistoryID") if isinstance(window.get("focusHistoryID"), int) else 1_000_000),
+                    )
+                )
+                snapshot = build_app_snapshot(window_selector(candidates[0]))
+                snapshot["lastAction"] = {
+                    "wait": "window",
+                    "matchedTarget": snapshot.get("target"),
+                    "message": "Window appeared; operate this returned target before continuing.",
+                }
+                return mcp_snapshot_result(snapshot)
+        except Exception as exc:
+            last_error = str(exc)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.15)
+    raise RuntimeError(f"wait_for_window timed out after {timeout}s" + (f": {last_error}" if last_error else ""))
+
+
+def target_exists(target: str) -> bool:
+    address = target_address(target)
+    if not address:
+        try:
+            resolve_hypr_window(target)
+            return True
+        except Exception:
+            return False
+    for window in list_hypr_windows():
+        if address and normalize(window.get("address")) == address:
+            return True
+    return False
+
+
+def semantic_wait_for_close(args: dict[str, Any]) -> dict[str, Any]:
+    target = args.get("target") or args.get("app")
+    if not isinstance(target, str) or not target:
+        raise RuntimeError("wait_for_close requires target or app")
+    timeout = args.get("timeout", 5)
+    if not isinstance(timeout, (int, float)):
+        timeout = 5
+    deadline = time.monotonic() + max(0.0, min(float(timeout), 30.0))
+    while True:
+        if not target_exists(target):
+            related_to = args.get("related_to")
+            if isinstance(related_to, str) and related_to:
+                snapshot = build_app_snapshot(related_to)
+                snapshot["lastAction"] = {
+                    "wait": "close",
+                    "targetClosed": True,
+                    "previousTarget": target,
+                    "continuedWithTarget": snapshot.get("target"),
+                    "message": "The target closed; continue with this related/root window state.",
+                }
+                return mcp_snapshot_result(snapshot)
+            return result_text({"ok": True, "targetClosed": True, "previousTarget": target})
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.15)
+    raise RuntimeError(f"wait_for_close timed out after {timeout}s: {target} is still present")
+
+
 def alias_click(button: str, click_count: int) -> Any:
     def call(args: dict[str, Any]) -> dict[str, Any]:
         next_args = dict(args)
@@ -3673,6 +3861,8 @@ SEMANTIC_TOOLS = {
     "key": semantic_press_key,
     "set_value": semantic_set_value,
     "wait": semantic_wait,
+    "wait_for_window": semantic_wait_for_window,
+    "wait_for_close": semantic_wait_for_close,
 }
 
 
@@ -3681,6 +3871,10 @@ def computer(args: dict[str, Any]) -> dict[str, Any]:
 
     if action in {"launch", "launch_app", "open_app"}:
         return tool_launch_app(args)
+    if action == "wait_for_window":
+        return semantic_wait_for_window(args)
+    if action == "wait_for_close":
+        return semantic_wait_for_close(args)
 
     app = args.get("app")
     if isinstance(app, str) and app:

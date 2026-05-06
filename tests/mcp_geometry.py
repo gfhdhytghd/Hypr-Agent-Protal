@@ -195,6 +195,16 @@ def main() -> int:
     rendered_popup = mcp.render_snapshot_text(popup_snapshot)
     assert "ACTIVE RELATED POPUP DETECTED:" in rendered_popup
     assert "address:0xpopup" in rendered_popup
+    delta = mcp.window_delta(
+        [{"address": "0xroot", "title": "Root", "hyprAgentProtalRelation": "self"}],
+        [
+            {"address": "0xroot", "title": "Root", "hyprAgentProtalRelation": "self"},
+            {"address": "0xpopup", "title": "Dialog", "hyprAgentProtalWindowKind": "popup", "hyprAgentProtalRelation": "related"},
+        ],
+    )
+    assert delta["opened"][0]["target"] == "address:0xpopup"
+    action_delta_snapshot = {**menu_snapshot, "lastAction": {"windowDelta": delta}}
+    assert "opened address:0xpopup" in mcp.render_snapshot_text(action_delta_snapshot)
     original_build_app_snapshot = mcp.build_app_snapshot
     original_list_hypr_windows = mcp.list_hypr_windows
     try:
@@ -238,6 +248,25 @@ def main() -> int:
     finally:
         mcp.build_app_snapshot = original_build_app_snapshot
         mcp.list_hypr_windows = original_list_hypr_windows
+    original_wait_window_candidates = mcp.wait_window_candidates
+    original_build_app_snapshot = mcp.build_app_snapshot
+    try:
+        mcp.wait_window_candidates = lambda args: [{"address": "0xwait", "title": "Dialog", "hyprAgentProtalWindowKind": "popup"}]
+        mcp.build_app_snapshot = lambda app: {
+            "app": {"name": "wait", "bundleIdentifier": "wait", "pid": 1},
+            "window": {"address": "0xwait", "class": "wait", "workspace": {"name": "1"}, "xwayland": False},
+            "target": app,
+            "windowTitle": "Dialog",
+            "treeLines": [],
+            "uiHints": {},
+            "accessibility": {"status": "ok"},
+        }
+        waited = mcp.semantic_wait_for_window({"related_to": "address:0xroot", "timeout": 0})
+        assert waited["structuredContent"]["target"] == "address:0xwait"
+        assert waited["structuredContent"]["lastAction"]["wait"] == "window"
+    finally:
+        mcp.wait_window_candidates = original_wait_window_candidates
+        mcp.build_app_snapshot = original_build_app_snapshot
     gmenu_action = {"objectPath": "/org/example/window/1/menus/menubar", "action": "win.insert-chart"}
     assert mcp.gtk_action_candidates_for_menu(gmenu_action)[0] == ("/org/example/window/1", "insert-chart")
     assert mcp.text_is_bulk_paste_candidate("A\tB\n1\t2") is True

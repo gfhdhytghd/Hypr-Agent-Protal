@@ -79,11 +79,13 @@ def main() -> int:
         "key",
         "set_value",
         "wait",
+        "wait_for_window",
+        "wait_for_close",
     }
     assert set(tools_by_name) == expected_tools
-    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.27"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.3.28"
     actions = set(tools_by_name["computer"]["inputSchema"]["properties"]["action"]["enum"])
-    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "doctor", "launch", "launch_app", "open_app", "get_cursor_position", "activate_menu_item", "left_click", "left_click_drag", "hover"]:
+    for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait", "wait_for_window", "wait_for_close", "doctor", "launch", "launch_app", "open_app", "get_cursor_position", "activate_menu_item", "left_click", "left_click_drag", "hover"]:
         assert action in actions
     assert tools_by_name["launch_app"]["inputSchema"]["properties"]["url"]["type"] == "string"
     assert tools_by_name["launch_app"]["inputSchema"]["properties"]["new_window"]["default"] is True
@@ -122,6 +124,8 @@ def main() -> int:
     assert tools_by_name["key"]["inputSchema"]["properties"]["modifiers"]["type"] == "string"
     assert tools_by_name["key"]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
     assert tools_by_name["set_value"]["inputSchema"]["required"] == ["app", "element_index", "value"]
+    assert tools_by_name["wait_for_window"]["inputSchema"]["properties"]["related_to"]["type"] == "string"
+    assert tools_by_name["wait_for_close"]["inputSchema"]["properties"]["related_to"]["type"] == "string"
     return 0
 
 
