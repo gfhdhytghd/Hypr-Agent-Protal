@@ -1059,6 +1059,9 @@ void placeRelatedWindowOnRootWorkspaceEarly(WorkspaceSession& session, const PHL
     if (!targetWorkspace || targetWorkspace->inert() || window->m_workspace == targetWorkspace)
         return;
 
+    window->m_noInitialFocus = true;
+    window->m_suppressedEvents |= Desktop::View::SUPPRESS_ACTIVATE | Desktop::View::SUPPRESS_ACTIVATE_FOCUSONLY;
+    window->m_ruleApplicator->noFocusOverride(Desktop::Types::COverridableVar<bool>(true, Desktop::Types::PRIORITY_SET_PROP));
     window->moveToWorkspace(targetWorkspace);
     window->m_monitor = targetWorkspace->m_monitor;
 }
@@ -1800,7 +1803,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.32",
+        .version = "0.3.33",
     };
 }
 
