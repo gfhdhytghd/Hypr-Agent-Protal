@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
+import json
+import pathlib
+import tempfile
+
+
+def load_ctl():
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    path = repo / "scripts" / "hypr-agent-protalctl"
+    loader = importlib.machinery.SourceFileLoader("hypr_agent_protalctl", str(path))
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    return module
+
+
+def main() -> int:
+    ctl = load_ctl()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        artifact = tmp / "monitor.rgba"
+        artifact.write_bytes(bytes([240, 240, 240, 255]) * 100)
+        session = {
+            "cursorPosition": {"x": 4.0, "y": 5.0},
+            "windows": [],
+            "monitors": [
+                {
+                    "name": "test",
+                    "geometry": {"x": 0.0, "y": 0.0, "width": 10.0, "height": 10.0},
+                    "scale": 1.0,
+                    "artifactPath": str(artifact),
+                    "artifactWidth": 10,
+                    "artifactHeight": 10,
+                }
+            ],
+        }
+
+        png, metadata = ctl.render_session_png(session, cursor_source="hyprland", cursor_path=tmp / "missing.json")
+        assert png.startswith(b"\x89PNG\r\n\x1a\n")
+        assert metadata["cursorIndicator"]["visible"] is True
+        assert metadata["cursorIndicator"]["source"] == "hyprland"
+        assert metadata["cursorIndicator"]["pixelPosition"] == {"x": 4, "y": 5}
+
+        (tmp / "cursor.json").write_text(json.dumps({"x": 8, "y": 9, "target": "address:0x1"}))
+        _, metadata = ctl.render_session_png(session, cursor_source="auto", cursor_path=tmp / "cursor.json")
+        assert metadata["cursorIndicator"]["visible"] is True
+        assert metadata["cursorIndicator"]["source"] == "agent"
+        assert metadata["cursorPosition"] == {"x": 8.0, "y": 9.0}
+
+        _, metadata = ctl.render_session_png(session, cursor_source="none", cursor_path=tmp / "cursor.json")
+        assert metadata["cursorIndicator"]["enabled"] is False
+        assert metadata["cursorIndicator"]["visible"] is False
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

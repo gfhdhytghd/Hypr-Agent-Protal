@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.19)
-project(HyprAgentProtal VERSION "0.2.1")
+project(HyprAgentProtal VERSION "0.2.2")
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,6 +47,11 @@ if(BUILD_TESTING AND Python3_Interpreter_FOUND)
       ${CMAKE_SOURCE_DIR}/scripts/hypr-agent-protalctl
       ${CMAKE_SOURCE_DIR}/mcp/hypr-agent-protal-mcp.py
       ${CMAKE_SOURCE_DIR}/tests/mcp_smoke.py
+      ${CMAKE_SOURCE_DIR}/tests/cursor_render.py
+  )
+  add_test(
+    NAME hypr-agent-protal-cursor-render
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/cursor_render.py
   )
   add_test(
     NAME hypr-agent-protal-mcp-smoke

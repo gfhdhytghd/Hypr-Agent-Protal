@@ -49,10 +49,13 @@ def main() -> int:
     tools = lines[1]["result"]["tools"]
     assert len(tools) == 1
     assert tools[0]["name"] == "computer"
+    assert lines[0]["result"]["serverInfo"]["version"] == "0.2.2"
     actions = set(tools[0]["inputSchema"]["properties"]["action"]["enum"])
     for action in ["screenshot", "windows", "click", "scroll", "drag", "key", "type", "paste_image", "session", "wait"]:
         assert action in actions
     assert tools[0]["inputSchema"]["properties"]["keycode"]["type"] == "integer"
+    assert tools[0]["inputSchema"]["properties"]["show_cursor"]["type"] == "boolean"
+    assert "agent" in tools[0]["inputSchema"]["properties"]["cursor_source"]["enum"]
     assert "keys" in tools[0]["inputSchema"]["properties"]["method"]["enum"]
     assert tools[0]["inputSchema"]["properties"]["prefer_related"]["type"] == "boolean"
     assert tools[0]["inputSchema"]["properties"]["restore_clipboard"]["type"] == "boolean"
