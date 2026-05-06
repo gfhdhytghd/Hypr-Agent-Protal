@@ -1296,13 +1296,61 @@ SDispatchResult dispatchPointer(const std::string& args) {
     }
 
     if (action == "doubleclick" || action == "double-click") {
-        for (int i = 0; i < 2; ++i) {
-            g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
-            g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
-        }
+        g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
+        g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
         showAgentIndicator(target->window, Vector2D{*x, *y}, action);
-        restore.restoreForTarget(*target);
+
+        if (!g_pEventLoopManager) {
+            restore.restoreForTarget(*target);
+            return {.success = true};
+        }
+
+        const auto previousSurface = restore.previousSurface;
+        const auto previousLocal = restore.previousLocal;
+        const auto targetSurface = target->surface;
+        const auto targetLocal = target->local;
+        const auto targetWindow = PHLWINDOWREF{target->window};
+        const auto targetGlobal = Vector2D{*x, *y};
+        const auto targetButton = *button;
+        const bool resetCurrentXWaylandFocus = target->window && target->window->m_isX11;
+        restore.restored = true;
+
+        auto timer = makeShared<CEventLoopTimer>(
+            std::chrono::milliseconds(180),
+            [previousSurface, previousLocal, targetSurface, targetLocal, targetWindow, targetGlobal, targetButton, resetCurrentXWaylandFocus](SP<CEventLoopTimer> self,
+                                                                                                                                            void*) mutable {
+                if (g_pSeatManager && targetSurface) {
+                    g_pSeatManager->setPointerFocus(targetSurface, targetLocal);
+                    g_pSeatManager->sendPointerMotion(nowMs(), targetLocal);
+                    g_pSeatManager->sendPointerButton(nowMs(), targetButton, WL_POINTER_BUTTON_STATE_PRESSED);
+                    g_pSeatManager->sendPointerButton(nowMs(), targetButton, WL_POINTER_BUTTON_STATE_RELEASED);
+                    g_pSeatManager->sendPointerFrame();
+                }
+
+                if (const auto window = targetWindow.lock())
+                    showAgentIndicator(window, targetGlobal, "doubleclick");
+
+                if (g_pSeatManager) {
+                    if (resetCurrentXWaylandFocus) {
+                        g_pSeatManager->m_state.pointerFocus.reset();
+                        g_pSeatManager->m_state.pointerFocusResource.reset();
+                    }
+                    g_pSeatManager->setPointerFocus(previousSurface, previousLocal);
+                    g_pSeatManager->sendPointerFrame();
+                }
+
+                if (g_pEventLoopManager)
+                    g_pEventLoopManager->removeTimer(self);
+
+                g_pointerRestoreTimers.erase(
+                    std::remove_if(g_pointerRestoreTimers.begin(), g_pointerRestoreTimers.end(), [&self](const auto& item) { return item.get() == self.get(); }),
+                    g_pointerRestoreTimers.end());
+            },
+            nullptr);
+
+        g_pointerRestoreTimers.push_back(timer);
+        g_pEventLoopManager->addTimer(timer);
         return {.success = true};
     }
 
@@ -1524,7 +1572,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and visible agent pointer primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.2.8",
+        .version = "0.2.9",
     };
 }
 
