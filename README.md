@@ -52,6 +52,30 @@ The MCP server exposes the compatibility tool `computer` plus Codex-style app-st
 
 The app-state coordinate contract matches the screenshot returned by `get_app_state`: `x`, `y`, `from_x`, `from_y`, `to_x`, and `to_y` are screenshot pixels, not Hyprland global logical coordinates. The MCP bridge converts them back to the target window's global logical coordinates before dispatch.
 
+### AT-SPI App State
+
+Linux does not expose a system-wide accessibility model as consistently as macOS Accessibility. `get_app_state` therefore treats AT-SPI as a semantic enhancement on top of compositor screenshots, not as the only source of truth.
+
+Expected coverage:
+
+- GTK/GNOME apps usually expose the best trees once `org.gnome.desktop.interface toolkit-accessibility` is enabled.
+- Qt/KDE apps can expose useful trees, but they normally need to be launched with `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`.
+- Firefox and LibreOffice generally expose meaningful document and control trees.
+- Chromium, Chrome, Electron, and VS Code often need `--force-renderer-accessibility`; without it they may only expose a top-level frame or nothing useful.
+- XWayland does not by itself prevent AT-SPI. The deciding factor is whether the app toolkit publishes an AT-SPI tree.
+- Custom-rendered apps, games, SDL/OpenGL surfaces, Flutter apps, and many proprietary chat clients often expose little or no semantic state. For those, use the screenshot image plus coordinate fallback.
+
+Recommended session setup for better app-state trees:
+
+```sh
+gsettings set org.gnome.desktop.interface toolkit-accessibility true
+systemctl --user start at-spi-dbus-bus.service
+systemctl --user set-environment QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1
+dbus-update-activation-environment --systemd QT_LINUX_ACCESSIBILITY_ALWAYS_ON
+```
+
+Persist `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` in the compositor environment before launching Qt apps, and add `--force-renderer-accessibility` to Chromium/Electron app flags where available. Apps usually need to be restarted after these settings change.
+
 The compatibility `computer` tool still exposes these lower-level actions:
 
 - `screenshot`: captures compositor screenshots and returns PNG image content plus metadata. Pass `target` for unoccluded target-window capture. Screenshot cursor drawing is a debug option and is off by default; use `show_cursor=true` or `cursor_source` values `auto`, `agent`, `hyprland`, `none` to draw it into the returned PNG.
