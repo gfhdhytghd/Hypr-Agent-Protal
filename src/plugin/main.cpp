@@ -145,8 +145,23 @@ Vector2D agentIndicatorWindowAnchor(const PHLWINDOW& window) {
     return window->getFullWindowBoundingBox().pos();
 }
 
-Vector2D agentIndicatorGlobalFromRelative(const PHLWINDOW& window, const Vector2D& relative) {
-    const auto anchor = agentIndicatorWindowAnchor(window);
+CBox agentIndicatorRenderedWindowBox(const PHLWINDOW& window) {
+    if (!window)
+        return {};
+
+    auto box = window->getFullWindowBoundingBox();
+    if (window->m_workspace && !window->m_pinned)
+        box.translate(window->m_workspace->m_renderOffset->value());
+    box.translate(window->m_floatingOffset);
+    return box;
+}
+
+Vector2D agentIndicatorRenderedWindowAnchor(const PHLWINDOW& window) {
+    return agentIndicatorRenderedWindowBox(window).pos();
+}
+
+Vector2D agentIndicatorRenderedGlobalFromRelative(const PHLWINDOW& window, const Vector2D& relative) {
+    const auto anchor = agentIndicatorRenderedWindowAnchor(window);
     return Vector2D{anchor.x + relative.x, anchor.y + relative.y};
 }
 
@@ -157,11 +172,11 @@ void damageAgentIndicator() {
     if (const auto window = g_agentPointerWindow.lock()) {
         g_pHyprRenderer->damageWindow(window, true);
         if (g_agentPointerRelativePosition)
-            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativePosition)));
+            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorRenderedGlobalFromRelative(window, *g_agentPointerRelativePosition)));
         if (g_agentPointerRelativeStartPosition)
-            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativeStartPosition)));
+            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorRenderedGlobalFromRelative(window, *g_agentPointerRelativeStartPosition)));
         if (g_agentPointerRelativeDisplayPosition)
-            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativeDisplayPosition)));
+            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorRenderedGlobalFromRelative(window, *g_agentPointerRelativeDisplayPosition)));
     }
 
     if (g_agentPointerPosition)
@@ -545,8 +560,8 @@ Vector2D animatedAgentPosition(const Time::steady_tp& now, const PHLWINDOW& wind
     if (!g_agentPointerPosition && !g_agentPointerRelativePosition)
         return {};
 
-    const Vector2D target = g_agentPointerRelativePosition ? agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativePosition) : *g_agentPointerPosition;
-    const Vector2D start = g_agentPointerRelativeStartPosition ? agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativeStartPosition) :
+    const Vector2D target = g_agentPointerRelativePosition ? agentIndicatorRenderedGlobalFromRelative(window, *g_agentPointerRelativePosition) : *g_agentPointerPosition;
+    const Vector2D start = g_agentPointerRelativeStartPosition ? agentIndicatorRenderedGlobalFromRelative(window, *g_agentPointerRelativeStartPosition) :
                                                         g_agentPointerStartPosition.value_or(target);
     if (!g_agentPointerMotionStarted || vectorLength(Vector2D{target.x - start.x, target.y - start.y}) < 2.0)
         return target;
@@ -571,7 +586,7 @@ void renderAgentIndicator(eRenderStage stage) {
     if (!monitor)
         return;
 
-    const auto windowBox = targetWindow->getFullWindowBoundingBox();
+    const auto windowBox = agentIndicatorRenderedWindowBox(targetWindow);
     const auto   now = Time::steadyNow();
     const double ageMs = static_cast<double>(std::chrono::duration_cast<std::chrono::milliseconds>(now - *g_agentPointerUpdated).count());
     const int    timeoutMs = indicatorTimeoutMs();
@@ -587,7 +602,7 @@ void renderAgentIndicator(eRenderStage stage) {
     const auto visibleWindowBox = intersectBoxes(windowBox, monitorBox);
     const auto displayGlobal = visibleWindowBox.empty() ? global : clampPointToBox(global, visibleWindowBox, 18.0);
     g_agentPointerDisplayPosition = displayGlobal;
-    const auto anchor = agentIndicatorWindowAnchor(targetWindow);
+    const auto anchor = agentIndicatorRenderedWindowAnchor(targetWindow);
     g_agentPointerRelativeDisplayPosition = Vector2D{displayGlobal.x - anchor.x, displayGlobal.y - anchor.y};
 
     const bool   clickLike = g_agentPointerAction == "click" || g_agentPointerAction == "doubleclick" || g_agentPointerAction == "double-click" ||
@@ -629,7 +644,10 @@ void scheduleIndicatorAnimation() {
             const auto now = Time::steadyNow();
             const bool animationDone = g_agentPointerUpdated &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - *g_agentPointerUpdated).count() > CODEX_CURSOR_ANIMATION_MS;
-            if ((!g_agentPointerPosition && !g_agentPointerRelativePosition) || !g_pEventLoopManager || animationDone) {
+            const int  timeoutMs = indicatorTimeoutMs();
+            const bool expired = g_agentPointerUpdated && timeoutMs > 0 &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(now - *g_agentPointerUpdated).count() > timeoutMs + 50;
+            if ((!g_agentPointerPosition && !g_agentPointerRelativePosition) || !g_pEventLoopManager || expired) {
                 if (g_pEventLoopManager)
                     g_pEventLoopManager->removeTimer(self);
                 if (g_indicatorAnimationTimer.get() == self.get())
@@ -638,7 +656,7 @@ void scheduleIndicatorAnimation() {
             }
 
             damageAgentIndicator();
-            self->updateTimeout(std::chrono::milliseconds(16));
+            self->updateTimeout(animationDone ? std::chrono::milliseconds(33) : std::chrono::milliseconds(16));
         },
         nullptr);
     g_pEventLoopManager->addTimer(g_indicatorAnimationTimer);
@@ -695,13 +713,14 @@ void showAgentIndicator(const PHLWINDOW& targetWindow, const Vector2D& globalPos
     if (!indicatorActionShouldSnap(action) && oldWindow && oldWindow == targetWindow) {
         if (previousRelativeDisplay) {
             relativeMotionStart = *previousRelativeDisplay;
-            motionStart = agentIndicatorGlobalFromRelative(targetWindow, relativeMotionStart);
-        } else if (previousDisplay && pointInsideBox(*previousDisplay, targetWindow->getFullWindowBoundingBox())) {
+            motionStart = agentIndicatorRenderedGlobalFromRelative(targetWindow, relativeMotionStart);
+        } else if (previousDisplay && pointInsideBox(*previousDisplay, agentIndicatorRenderedWindowBox(targetWindow))) {
             motionStart = *previousDisplay;
-            relativeMotionStart = Vector2D{motionStart.x - anchor.x, motionStart.y - anchor.y};
+            const auto renderedAnchor = agentIndicatorRenderedWindowAnchor(targetWindow);
+            relativeMotionStart = Vector2D{motionStart.x - renderedAnchor.x, motionStart.y - renderedAnchor.y};
         } else if (previousRelativeTarget) {
             relativeMotionStart = *previousRelativeTarget;
-            motionStart = agentIndicatorGlobalFromRelative(targetWindow, relativeMotionStart);
+            motionStart = agentIndicatorRenderedGlobalFromRelative(targetWindow, relativeMotionStart);
         } else if (previousTarget && pointInsideBox(*previousTarget, targetWindow->getFullWindowBoundingBox())) {
             motionStart = *previousTarget;
             relativeMotionStart = Vector2D{motionStart.x - anchor.x, motionStart.y - anchor.y};
@@ -1946,7 +1965,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.43",
+        .version = "0.3.44",
     };
 }
 
