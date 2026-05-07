@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import base64
+import copy
 import json
 import mimetypes
 import os
@@ -15,10 +16,11 @@ from typing import Any
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SERVER_VERSION = "0.3.42"
+SERVER_VERSION = "0.3.43"
 SNAPSHOTS: dict[str, dict[str, Any]] = {}
 GLOBAL_MENU_LIMIT = 80
 DEFAULT_MODEL_SCREENSHOT_RESOLUTION = "logical"
+GEOMETRY_EPSILON = 0.5
 
 _ATSPI_INIT_ERROR: str | None | bool = None
 _ATSPI: Any = None
@@ -1192,7 +1194,104 @@ def current_snapshot(app: str) -> dict[str, Any]:
     snapshot = SNAPSHOTS.get(normalize(app))
     if snapshot is None:
         snapshot = build_app_snapshot(app)
+    else:
+        snapshot, _ = refresh_snapshot_geometry(snapshot, app, rebuild_on_resize=True)
     return snapshot
+
+
+def snapshot_window_query(snapshot: dict[str, Any], fallback: str) -> str:
+    target = str(snapshot.get("target") or "")
+    if target:
+        return target
+    window = snapshot.get("window") or {}
+    if isinstance(window, dict) and window.get("address"):
+        return window_selector(window)
+    return fallback
+
+
+def snapshot_geometry(snapshot: dict[str, Any]) -> dict[str, float]:
+    bounds = snapshot.get("windowBounds")
+    if isinstance(bounds, dict):
+        return {
+            "x": float(bounds.get("x") or 0.0),
+            "y": float(bounds.get("y") or 0.0),
+            "width": float(bounds.get("width") or 0.0),
+            "height": float(bounds.get("height") or 0.0),
+        }
+    window = snapshot.get("window") or {}
+    return window_geometry(window) if isinstance(window, dict) else {"x": 0.0, "y": 0.0, "width": 0.0, "height": 0.0}
+
+
+def geometry_size_changed(old: dict[str, float], new: dict[str, float]) -> bool:
+    return abs(float(old.get("width") or 0.0) - float(new.get("width") or 0.0)) > GEOMETRY_EPSILON or abs(
+        float(old.get("height") or 0.0) - float(new.get("height") or 0.0)
+    ) > GEOMETRY_EPSILON
+
+
+def geometry_position_delta(old: dict[str, float], new: dict[str, float]) -> tuple[float, float]:
+    return float(new.get("x") or 0.0) - float(old.get("x") or 0.0), float(new.get("y") or 0.0) - float(old.get("y") or 0.0)
+
+
+def geometry_moved(old: dict[str, float], new: dict[str, float]) -> bool:
+    dx, dy = geometry_position_delta(old, new)
+    return abs(dx) > GEOMETRY_EPSILON or abs(dy) > GEOMETRY_EPSILON
+
+
+def shift_snapshot_to_live_window(snapshot: dict[str, Any], live_window: dict[str, Any], dx: float, dy: float) -> dict[str, Any]:
+    shifted = copy.deepcopy(snapshot)
+    shifted["window"] = live_window
+    shifted["windowBounds"] = window_geometry(live_window)
+    shifted["target"] = window_selector(live_window)
+    screenshot = shifted.get("screenshot")
+    if isinstance(screenshot, dict):
+        bounds = screenshot.get("logicalBounds")
+        if isinstance(bounds, dict):
+            bounds["x"] = float(bounds.get("x") or 0.0) + dx
+            bounds["y"] = float(bounds.get("y") or 0.0) + dy
+    return shifted
+
+
+def compact_geometry_info(geometry: dict[str, float]) -> dict[str, float]:
+    return {key: round(float(geometry.get(key) or 0.0), 3) for key in ["x", "y", "width", "height"]}
+
+
+def refresh_snapshot_geometry(snapshot: dict[str, Any], app: str, *, rebuild_on_resize: bool) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    query = snapshot_window_query(snapshot, app)
+    live_window = resolve_hypr_window(query)
+    old_geometry = snapshot_geometry(snapshot)
+    live_geometry = window_geometry(live_window)
+    target = window_selector(live_window)
+
+    if geometry_size_changed(old_geometry, live_geometry):
+        info = {
+            "type": "windowGeometryChanged",
+            "change": "resized",
+            "old": compact_geometry_info(old_geometry),
+            "current": compact_geometry_info(live_geometry),
+            "target": target,
+            "rebuilt": bool(rebuild_on_resize),
+        }
+        if rebuild_on_resize:
+            rebuilt = build_app_snapshot(target)
+            return rebuilt, info
+        return snapshot, info
+
+    if geometry_moved(old_geometry, live_geometry):
+        dx, dy = geometry_position_delta(old_geometry, live_geometry)
+        shifted = shift_snapshot_to_live_window(snapshot, live_window, dx, dy)
+        info = {
+            "type": "windowGeometryChanged",
+            "change": "moved",
+            "delta": {"x": round(dx, 3), "y": round(dy, 3)},
+            "old": compact_geometry_info(old_geometry),
+            "current": compact_geometry_info(live_geometry),
+            "target": target,
+            "rebuilt": False,
+        }
+        remember_snapshot(app, shifted)
+        return shifted, info
+
+    return snapshot, None
 
 
 def ensure_global_menu_backends() -> dict[str, Any]:
@@ -1549,6 +1648,132 @@ def lookup_element(snapshot: dict[str, Any], element_index: str) -> dict[str, An
     raise RuntimeError(f'unknown element_index "{element_index}"')
 
 
+def element_runtime_id(element: dict[str, Any]) -> tuple[Any, ...]:
+    runtime_id = element.get("runtimeId")
+    return tuple(runtime_id) if isinstance(runtime_id, list) else ()
+
+
+def element_identity_text(element: dict[str, Any]) -> str:
+    return " ".join(
+        part
+        for part in [
+            str(element.get("name") or ""),
+            str(element.get("value") or ""),
+            str(element.get("automationId") or ""),
+        ]
+        if part
+    )
+
+
+def frame_distance(a: dict[str, Any], b: dict[str, Any]) -> float:
+    frame_a = a.get("frame")
+    frame_b = b.get("frame")
+    if not isinstance(frame_a, dict) or not isinstance(frame_b, dict):
+        return 1_000_000.0
+    ax = float(frame_a.get("x") or 0.0) + float(frame_a.get("width") or 0.0) / 2.0
+    ay = float(frame_a.get("y") or 0.0) + float(frame_a.get("height") or 0.0) / 2.0
+    bx = float(frame_b.get("x") or 0.0) + float(frame_b.get("width") or 0.0) / 2.0
+    by = float(frame_b.get("y") or 0.0) + float(frame_b.get("height") or 0.0) / 2.0
+    return ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5
+
+
+def element_match_score(old: dict[str, Any], candidate: dict[str, Any], fallback_index: int) -> tuple[float, list[str]]:
+    score = 0.0
+    reasons: list[str] = []
+    old_runtime = element_runtime_id(old)
+    candidate_runtime = element_runtime_id(candidate)
+    old_role = element_role(old)
+    candidate_role = element_role(candidate)
+    old_name = normalize(old.get("name"))
+    candidate_name = normalize(candidate.get("name"))
+    old_value = normalize(old.get("value"))
+    candidate_value = normalize(candidate.get("value"))
+    old_automation = normalize(old.get("automationId"))
+    candidate_automation = normalize(candidate.get("automationId"))
+
+    if old_runtime and old_runtime == candidate_runtime:
+        score += 1000.0
+        reasons.append("runtimeId")
+    if old_automation and old_automation == candidate_automation:
+        score += 420.0
+        reasons.append("automationId")
+    if old_role and old_role == candidate_role:
+        score += 90.0
+        reasons.append("role")
+    if old_name and old_name == candidate_name:
+        score += 180.0
+        reasons.append("name")
+    elif old_name and candidate_name and (old_name in candidate_name or candidate_name in old_name):
+        score += 70.0
+        reasons.append("name-prefix")
+    if old_value and old_value == candidate_value:
+        score += 120.0
+        reasons.append("value")
+    elif old_value and candidate_value and (old_value in candidate_value or candidate_value in old_value):
+        score += 45.0
+        reasons.append("value-prefix")
+    if normalize(old.get("source")) and normalize(old.get("source")) == normalize(candidate.get("source")):
+        score += 20.0
+        reasons.append("source")
+    if int(candidate.get("index", -1)) == fallback_index:
+        score += 55.0
+        reasons.append("same-index")
+
+    old_actions = {normalize(action) for action in old.get("actions") or [] if action}
+    candidate_actions = {normalize(action) for action in candidate.get("actions") or [] if action}
+    if old_actions and candidate_actions and old_actions & candidate_actions:
+        score += 25.0
+        reasons.append("actions")
+
+    distance = frame_distance(old, candidate)
+    if distance < 1_000_000.0:
+        score += max(0.0, 45.0 - min(distance, 450.0) / 10.0)
+    return score, reasons
+
+
+def refind_element_in_snapshot(snapshot: dict[str, Any], old_element: dict[str, Any], fallback_index: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    candidates: list[tuple[float, list[str], dict[str, Any]]] = []
+    for candidate in snapshot.get("elements") or []:
+        if not isinstance(candidate, dict):
+            continue
+        score, reasons = element_match_score(old_element, candidate, fallback_index)
+        if reasons:
+            candidates.append((score, reasons, dict(candidate)))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+
+    if candidates:
+        score, reasons, element = candidates[0]
+        old_has_identity = bool(element_runtime_id(old_element) or normalize(old_element.get("automationId")) or element_identity_text(old_element))
+        role_matches = element_role(old_element) == element_role(element)
+        strong_identity = any(reason in reasons for reason in ["runtimeId", "automationId", "name", "value"])
+        same_index = "same-index" in reasons
+        if score >= 160.0 and (strong_identity or role_matches or same_index):
+            return element, {"matched": True, "score": round(score, 3), "matchedBy": reasons, "oldIndex": fallback_index, "newIndex": element.get("index")}
+        if not old_has_identity and role_matches and same_index:
+            return element, {"matched": True, "score": round(score, 3), "matchedBy": reasons, "oldIndex": fallback_index, "newIndex": element.get("index")}
+
+    raise RuntimeError(f'element_index "{fallback_index}" became stale after the target window changed size; call get_app_state and choose the visible element again')
+
+
+def element_snapshot_for_action(app: str, element_index: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any] | None]:
+    snapshot = SNAPSHOTS.get(normalize(app))
+    if snapshot is None:
+        snapshot = build_app_snapshot(app)
+    old_element = lookup_element(snapshot, element_index)
+    fallback_index = int(element_index)
+    snapshot, refresh_info = refresh_snapshot_geometry(snapshot, app, rebuild_on_resize=False)
+
+    if isinstance(refresh_info, dict) and refresh_info.get("change") == "resized":
+        rebuilt = build_app_snapshot(str(refresh_info.get("target") or snapshot_window_query(snapshot, app)))
+        element, rematch_info = refind_element_in_snapshot(rebuilt, old_element, fallback_index)
+        return rebuilt, element, {"geometryRefresh": refresh_info, "elementRematch": rematch_info}
+
+    element = lookup_element(snapshot, element_index)
+    if isinstance(refresh_info, dict):
+        return snapshot, element, {"geometryRefresh": refresh_info}
+    return snapshot, element, None
+
+
 def screenshot_point_to_global(snapshot: dict[str, Any], x: float, y: float) -> tuple[float, float]:
     screenshot = snapshot.get("screenshot") or {}
     bounds = screenshot.get("logicalBounds") or {}
@@ -1571,6 +1796,41 @@ def point_to_global(snapshot: dict[str, Any], x: float, y: float, coordinate_spa
     if space == "global":
         return x, y
     raise RuntimeError(f"unsupported coordinate_space: {coordinate_space}")
+
+
+def point_to_window(snapshot: dict[str, Any], x: float, y: float, coordinate_space: Any = "screenshot") -> tuple[float, float]:
+    space = normalize(coordinate_space or "screenshot").replace("_", "-")
+    if space in {"window", "window-relative", "window-logical", "logical"}:
+        return float(x), float(y)
+    global_x, global_y = point_to_global(snapshot, x, y, coordinate_space)
+    origin_x, origin_y = window_origin(snapshot)
+    return global_x - origin_x, global_y - origin_y
+
+
+def pointer_call_coordinates(snapshot: dict[str, Any], x: float, y: float, coordinate_space: Any) -> tuple[float, float, float, float, bool]:
+    global_x, global_y = point_to_global(snapshot, x, y, coordinate_space)
+    space = normalize(coordinate_space or "screenshot").replace("_", "-")
+    if space == "global":
+        return global_x, global_y, global_x, global_y, False
+    window_x, window_y = point_to_window(snapshot, x, y, coordinate_space)
+    return global_x, global_y, window_x, window_y, True
+
+
+def pointer_ctl_args(snapshot: dict[str, Any], x: float, y: float, coordinate_space: Any, action: str, button: str = "left") -> tuple[list[str], dict[str, Any]]:
+    global_x, global_y, window_x, window_y, use_relative = pointer_call_coordinates(snapshot, x, y, coordinate_space)
+    args = ["pointer", "--json"]
+    if use_relative:
+        args.append("--relative")
+        dispatch_x, dispatch_y = window_x, window_y
+    else:
+        dispatch_x, dispatch_y = global_x, global_y
+    args.extend([str(snapshot["target"]), str(dispatch_x), str(dispatch_y), action, button])
+    return args, {
+        "global": {"x": global_x, "y": global_y},
+        "window": {"x": window_x, "y": window_y, "coordinateSpace": "window"},
+        "dispatchCoordinateSpace": "window" if use_relative else "global",
+        "dispatchCoordinate": {"x": dispatch_x, "y": dispatch_y},
+    }
 
 
 def coordinate_pair(value: Any) -> tuple[float, float] | None:
@@ -3603,22 +3863,24 @@ def tool_get_cursor_position(args: dict[str, Any]) -> dict[str, Any]:
 
 def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
-    snapshot = current_snapshot(app)
-    target = str(snapshot["target"])
     button = str(args.get("mouse_button") or "left")
     click_count = int(args.get("click_count") or 1)
-    session_info = begin_related_action_session(target)
 
     element_index = args.get("element_index")
     element = None
+    refresh_info = None
     if isinstance(element_index, str) and element_index:
-        element = lookup_element(snapshot, element_index)
+        snapshot, element, refresh_info = element_snapshot_for_action(app, element_index)
         x, y = visible_element_center(snapshot, element)
         coordinate_space = "screenshot"
     else:
+        snapshot = current_snapshot(app)
         point = action_point(snapshot, args)
         x, y = point
         coordinate_space = args.get("coordinate_space") or "screenshot"
+
+    target = str(snapshot["target"])
+    session_info = begin_related_action_session(target)
 
     if element is not None and button == "left" and click_count == 1:
         mode = element_click_mode(args)
@@ -3631,38 +3893,43 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
             else:
                 control_overlay(snapshot, float(x), float(y), coordinate_space=coordinate_space, action="click")
                 if atspi_do_action_isolated(snapshot, element):
+                    action_result = {"method": "atspi", "clickedElement": compact_element_info(element, float(x), float(y), coordinate_space), "session": session_info}
+                    if refresh_info:
+                        action_result.update(refresh_info)
                     finish_related_action_session(target, session_info)
                     return mcp_snapshot_result(
                         snapshot_after_action(
                             app,
                             snapshot,
-                            {"method": "atspi", "clickedElement": compact_element_info(element, float(x), float(y), coordinate_space), "session": session_info},
+                            action_result,
                         )
                     )
                 if mode == "atspi":
                     finish_related_action_session(target, session_info)
                     raise RuntimeError("AT-SPI element action failed; use element_click_mode=pointer for native pointer click")
 
-    global_x, global_y = point_to_global(snapshot, float(x), float(y), coordinate_space)
     action = "doubleclick" if click_count > 1 and button == "left" else "click"
+    ctl_args, pointer_info = pointer_ctl_args(snapshot, float(x), float(y), coordinate_space, action, button)
     info: dict[str, Any] = {
         "method": "pointer",
         "target": target,
         "button": button,
         "clickCount": click_count,
         "coordinate": {"x": float(x), "y": float(y), "coordinateSpace": coordinate_space},
-        "global": {"x": global_x, "y": global_y},
+        **pointer_info,
     }
+    if refresh_info:
+        info.update(refresh_info)
     if element is not None:
         info["clickedElement"] = compact_element_info(element, float(x), float(y), coordinate_space)
     for index in range(max(1, click_count)):
         if action == "doubleclick":
             break
-        call_ctl(["pointer", "--json", target, str(global_x), str(global_y), "click", button])
+        call_ctl(ctl_args)
         if index + 1 < click_count:
             time.sleep(0.12)
     if action == "doubleclick":
-        call_ctl(["pointer", "--json", target, str(global_x), str(global_y), "doubleclick", button])
+        call_ctl(ctl_args)
     finish_related_action_session(target, session_info)
     info["session"] = session_info
     return mcp_snapshot_result(snapshot_after_action(app, snapshot, info))
@@ -3670,13 +3937,12 @@ def semantic_click(args: dict[str, Any]) -> dict[str, Any]:
 
 def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
-    snapshot = current_snapshot(app)
-    target = str(snapshot["target"])
-    session_info = begin_related_action_session(target)
-    element = lookup_element(snapshot, str(args.get("element_index") or ""))
     action = str(args.get("action") or "")
     if not action:
         raise RuntimeError("Missing required argument: action")
+    snapshot, element, refresh_info = element_snapshot_for_action(app, str(args.get("element_index") or ""))
+    target = str(snapshot["target"])
+    session_info = begin_related_action_session(target)
     try:
         x, y = visible_element_center(snapshot, element)
         control_overlay(snapshot, x, y, action=action)
@@ -3686,7 +3952,10 @@ def semantic_perform_secondary_action(args: dict[str, Any]) -> dict[str, Any]:
         finish_related_action_session(target, session_info)
         raise RuntimeError(f"{action} is not a valid secondary action for element")
     finish_related_action_session(target, session_info)
-    return mcp_snapshot_result(snapshot_after_action(app, snapshot, {"method": "atspi", "action": action, "session": session_info}))
+    info = {"method": "atspi", "action": action, "session": session_info}
+    if refresh_info:
+        info.update(refresh_info)
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot, info))
 
 
 def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
@@ -3714,7 +3983,6 @@ def semantic_activate_menu_item(args: dict[str, Any]) -> dict[str, Any]:
 
 def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
-    snapshot = current_snapshot(app)
     direction = str(args.get("direction") or "down").lower()
     action_name = scroll_action_for_direction(direction)
     pages = float(args.get("pages") or 1.0)
@@ -3722,11 +3990,13 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError("pages must be > 0")
     element_index = args.get("element_index")
     element = None
+    refresh_info = None
     if isinstance(element_index, str) and element_index:
-        element = lookup_element(snapshot, element_index)
+        snapshot, element, refresh_info = element_snapshot_for_action(app, element_index)
         x, y = visible_element_center(snapshot, element)
         coordinate_space = "screenshot"
     else:
+        snapshot = current_snapshot(app)
         element = best_scroll_element(snapshot, direction)
         if element is not None:
             x, y = visible_element_center(snapshot, element)
@@ -3737,7 +4007,7 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
 
     if element is None and (not isinstance(element_index, str) or not element_index):
         coordinate_space = args.get("coordinate_space") or "screenshot"
-    global_x, global_y = point_to_global(snapshot, x, y, coordinate_space)
+    ctl_args, pointer_info = pointer_ctl_args(snapshot, x, y, coordinate_space, "scroll", "0")
     ticks = max(1.0, pages * 5.0)
     dx = 0.0
     dy = 0.0
@@ -3752,8 +4022,11 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
     else:
         raise RuntimeError(f"Invalid scroll direction: {direction}")
     try:
-        call_ctl(["pointer", "--json", str(snapshot["target"]), str(global_x), str(global_y), "scroll", str(dy), "--dx", str(dx)])
-        return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+        call_ctl([*ctl_args[:-1], str(dy), "--dx", str(dx)])
+        action_result = {"method": "pointer", "action": "scroll", "direction": direction, "pages": pages, **pointer_info}
+        if refresh_info:
+            action_result.update(refresh_info)
+        return mcp_snapshot_result(snapshot_after_action(app, snapshot, action_result))
     except Exception:
         if element is None or not element_supports_scroll_direction(element, direction):
             raise
@@ -3763,7 +4036,10 @@ def semantic_scroll(args: dict[str, Any]) -> dict[str, Any]:
             ok = atspi_do_action_isolated(snapshot, element, action_name) or ok
         if not ok:
             raise
-        return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+        action_result = {"method": "atspi", "action": action_name, "direction": direction, "pages": pages}
+        if refresh_info:
+            action_result.update(refresh_info)
+        return mcp_snapshot_result(snapshot_after_action(app, snapshot, action_result))
 
 
 def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
@@ -3774,10 +4050,25 @@ def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
     if start is None or end is None:
         raise RuntimeError("drag requires start_coordinate/coordinate or from_x/from_y/to_x/to_y")
     coordinate_space = args.get("coordinate_space") or "screenshot"
-    from_x, from_y = point_to_global(snapshot, start[0], start[1], coordinate_space)
-    to_x, to_y = point_to_global(snapshot, end[0], end[1], coordinate_space)
+    from_global_x, from_global_y, from_window_x, from_window_y, use_relative = pointer_call_coordinates(snapshot, start[0], start[1], coordinate_space)
+    to_global_x, to_global_y, to_window_x, to_window_y, _ = pointer_call_coordinates(snapshot, end[0], end[1], coordinate_space)
+    if use_relative:
+        ctl_args = [
+            "pointer",
+            "--json",
+            "--relative",
+            str(snapshot["target"]),
+            str(from_window_x),
+            str(from_window_y),
+            "drag",
+            "left",
+            str(to_window_x),
+            str(to_window_y),
+        ]
+    else:
+        ctl_args = ["pointer", "--json", str(snapshot["target"]), str(from_global_x), str(from_global_y), "drag", "left", str(to_global_x), str(to_global_y)]
     duration = float(args.get("duration") or 0.2)
-    call_ctl(["pointer", "--json", str(snapshot["target"]), str(from_x), str(from_y), "drag", "left", str(to_x), str(to_y), "--duration", str(max(0.0, min(duration, 3.0)))])
+    call_ctl([*ctl_args, "--duration", str(max(0.0, min(duration, 3.0)))])
     action_result = {
         "method": "pointer",
         "target": str(snapshot["target"]),
@@ -3785,8 +4076,11 @@ def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
         "button": "left",
         "from": {"x": start[0], "y": start[1], "coordinateSpace": coordinate_space},
         "to": {"x": end[0], "y": end[1], "coordinateSpace": coordinate_space},
-        "globalFrom": {"x": from_x, "y": from_y},
-        "globalTo": {"x": to_x, "y": to_y},
+        "windowFrom": {"x": from_window_x, "y": from_window_y, "coordinateSpace": "window"},
+        "windowTo": {"x": to_window_x, "y": to_window_y, "coordinateSpace": "window"},
+        "globalFrom": {"x": from_global_x, "y": from_global_y},
+        "globalTo": {"x": to_global_x, "y": to_global_y},
+        "dispatchCoordinateSpace": "window" if use_relative else "global",
         "duration": max(0.0, min(duration, 3.0)),
     }
     return mcp_snapshot_result(snapshot_after_action(app, snapshot, action_result))
@@ -3794,11 +4088,22 @@ def semantic_drag(args: dict[str, Any]) -> dict[str, Any]:
 
 def semantic_hover(args: dict[str, Any]) -> dict[str, Any]:
     app = str(args.get("app") or "")
-    snapshot = current_snapshot(app)
-    x, y = action_point(snapshot, args)
-    global_x, global_y = point_to_global(snapshot, x, y, args.get("coordinate_space") or "screenshot")
-    call_ctl(["pointer", "--json", str(snapshot["target"]), str(global_x), str(global_y), "move", "left"])
-    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+    element_index = args.get("element_index")
+    refresh_info = None
+    if isinstance(element_index, str) and element_index:
+        snapshot, element, refresh_info = element_snapshot_for_action(app, element_index)
+        x, y = visible_element_center(snapshot, element)
+        coordinate_space = "screenshot"
+    else:
+        snapshot = current_snapshot(app)
+        x, y = action_point(snapshot, args)
+        coordinate_space = args.get("coordinate_space") or "screenshot"
+    ctl_args, pointer_info = pointer_ctl_args(snapshot, x, y, coordinate_space, "move", "left")
+    call_ctl(ctl_args)
+    action_result = {"method": "pointer", "action": "move", **pointer_info}
+    if refresh_info:
+        action_result.update(refresh_info)
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot, action_result))
 
 
 def semantic_type_text(args: dict[str, Any]) -> dict[str, Any]:
@@ -3870,16 +4175,22 @@ def semantic_set_value(args: dict[str, Any]) -> dict[str, Any]:
     value = args.get("value")
     if not isinstance(value, str):
         raise RuntimeError("Missing required argument: value")
-    snapshot = current_snapshot(app)
-    element = lookup_element(snapshot, str(args.get("element_index") or ""))
+    snapshot, element, refresh_info = element_snapshot_for_action(app, str(args.get("element_index") or ""))
+    element_point: tuple[float, float] | None = None
     try:
         x, y = visible_element_center(snapshot, element)
+        element_point = (x, y)
         control_overlay(snapshot, x, y, action="set_value")
     except Exception:
         control_overlay(snapshot, action="set_value")
     if not atspi_set_element_value_isolated(snapshot, element, value):
         raise RuntimeError("Cannot set a value for an element that is not settable")
-    return mcp_snapshot_result(snapshot_after_action(app, snapshot))
+    action_result = {"method": "atspi", "action": "set_value"}
+    if element_point is not None:
+        action_result["element"] = compact_element_info(element, element_point[0], element_point[1], "screenshot")
+    if refresh_info:
+        action_result.update(refresh_info)
+    return mcp_snapshot_result(snapshot_after_action(app, snapshot, action_result))
 
 
 def semantic_wait(args: dict[str, Any]) -> dict[str, Any]:

@@ -59,6 +59,9 @@ PHLWINDOWREF                     g_agentPointerWindow;
 std::optional<Vector2D>          g_agentPointerPosition;
 std::optional<Vector2D>          g_agentPointerStartPosition;
 std::optional<Vector2D>          g_agentPointerDisplayPosition;
+std::optional<Vector2D>          g_agentPointerRelativePosition;
+std::optional<Vector2D>          g_agentPointerRelativeStartPosition;
+std::optional<Vector2D>          g_agentPointerRelativeDisplayPosition;
 std::optional<Time::steady_tp>   g_agentPointerUpdated;
 std::optional<Time::steady_tp>   g_agentPointerMotionStarted;
 std::string                      g_agentPointerAction;
@@ -136,12 +139,30 @@ CBox agentIndicatorBounds(const Vector2D& globalPos) {
     return CBox{globalPos.x - 44.0, globalPos.y - 50.0, 88.0, 88.0};
 }
 
+Vector2D agentIndicatorWindowAnchor(const PHLWINDOW& window) {
+    if (!window)
+        return {};
+    return window->getFullWindowBoundingBox().pos();
+}
+
+Vector2D agentIndicatorGlobalFromRelative(const PHLWINDOW& window, const Vector2D& relative) {
+    const auto anchor = agentIndicatorWindowAnchor(window);
+    return Vector2D{anchor.x + relative.x, anchor.y + relative.y};
+}
+
 void damageAgentIndicator() {
     if (!g_pHyprRenderer)
         return;
 
-    if (const auto window = g_agentPointerWindow.lock())
+    if (const auto window = g_agentPointerWindow.lock()) {
         g_pHyprRenderer->damageWindow(window, true);
+        if (g_agentPointerRelativePosition)
+            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativePosition)));
+        if (g_agentPointerRelativeStartPosition)
+            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativeStartPosition)));
+        if (g_agentPointerRelativeDisplayPosition)
+            g_pHyprRenderer->damageBox(agentIndicatorBounds(agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativeDisplayPosition)));
+    }
 
     if (g_agentPointerPosition)
         g_pHyprRenderer->damageBox(agentIndicatorBounds(*g_agentPointerPosition));
@@ -410,6 +431,27 @@ bool pointInsideBox(const Vector2D& point, const CBox& box, double padding = 0.0
     return point.x >= box.x + padding && point.y >= box.y + padding && point.x <= box.x + box.w - padding && point.y <= box.y + box.h - padding;
 }
 
+CBox intersectBoxes(const CBox& a, const CBox& b) {
+    const double left = std::max(a.x, b.x);
+    const double top = std::max(a.y, b.y);
+    const double right = std::min(a.x + a.w, b.x + b.w);
+    const double bottom = std::min(a.y + a.h, b.y + b.h);
+    if (right <= left || bottom <= top)
+        return {};
+    return CBox{left, top, right - left, bottom - top};
+}
+
+Vector2D clampPointToBox(const Vector2D& point, const CBox& box, double padding) {
+    if (box.empty())
+        return point;
+    const double padX = std::min(std::max(0.0, padding), std::max(0.0, box.w * 0.5 - 1.0));
+    const double padY = std::min(std::max(0.0, padding), std::max(0.0, box.h * 0.5 - 1.0));
+    return Vector2D{
+        std::clamp(point.x, box.x + padX, box.x + box.w - padX),
+        std::clamp(point.y, box.y + padY, box.y + box.h - padY),
+    };
+}
+
 bool indicatorActionShouldSnap(std::string_view action) {
     return action == "click" || action == "doubleclick" || action == "double-click" || action == "press" || action == "down" || action == "release" ||
         action == "up" || action == "scroll" || action == "key" || action == "type" || action == "set_value";
@@ -499,12 +541,13 @@ double officialSpringProgress(double elapsedMs) {
     return std::clamp(current, 0.0, 1.0);
 }
 
-Vector2D animatedAgentPosition(const Time::steady_tp& now, const CBox& bounds) {
-    if (!g_agentPointerPosition)
+Vector2D animatedAgentPosition(const Time::steady_tp& now, const PHLWINDOW& window, const CBox& bounds) {
+    if (!g_agentPointerPosition && !g_agentPointerRelativePosition)
         return {};
 
-    const Vector2D target = *g_agentPointerPosition;
-    const Vector2D start = g_agentPointerStartPosition.value_or(target);
+    const Vector2D target = g_agentPointerRelativePosition ? agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativePosition) : *g_agentPointerPosition;
+    const Vector2D start = g_agentPointerRelativeStartPosition ? agentIndicatorGlobalFromRelative(window, *g_agentPointerRelativeStartPosition) :
+                                                        g_agentPointerStartPosition.value_or(target);
     if (!g_agentPointerMotionStarted || vectorLength(Vector2D{target.x - start.x, target.y - start.y}) < 2.0)
         return target;
 
@@ -515,7 +558,8 @@ Vector2D animatedAgentPosition(const Time::steady_tp& now, const CBox& bounds) {
 }
 
 void renderAgentIndicator(eRenderStage stage) {
-    if (stage != RENDER_POST_WINDOW || !configBool("show_indicator", true) || !g_agentPointerPosition || !g_agentPointerUpdated || !g_pHyprOpenGL || !g_pHyprRenderer)
+    if (stage != RENDER_POST_WINDOW || !configBool("show_indicator", true) || (!g_agentPointerPosition && !g_agentPointerRelativePosition) || !g_agentPointerUpdated ||
+        !g_pHyprOpenGL || !g_pHyprRenderer)
         return;
 
     const auto targetWindow = g_agentPointerWindow.lock();
@@ -538,18 +582,21 @@ void renderAgentIndicator(eRenderStage stage) {
     if (fade <= 0.0)
         return;
 
-    const auto global = animatedAgentPosition(now, windowBox);
-    g_agentPointerDisplayPosition = global;
-    if (!pointInsideBox(global, windowBox))
-        return;
+    const auto global = animatedAgentPosition(now, targetWindow, windowBox);
+    const auto monitorBox = CBox{monitor->m_position.x, monitor->m_position.y, monitor->m_size.x, monitor->m_size.y};
+    const auto visibleWindowBox = intersectBoxes(windowBox, monitorBox);
+    const auto displayGlobal = visibleWindowBox.empty() ? global : clampPointToBox(global, visibleWindowBox, 18.0);
+    g_agentPointerDisplayPosition = displayGlobal;
+    const auto anchor = agentIndicatorWindowAnchor(targetWindow);
+    g_agentPointerRelativeDisplayPosition = Vector2D{displayGlobal.x - anchor.x, displayGlobal.y - anchor.y};
 
     const bool   clickLike = g_agentPointerAction == "click" || g_agentPointerAction == "doubleclick" || g_agentPointerAction == "double-click" ||
         g_agentPointerAction == "press" || g_agentPointerAction == "down" || g_agentPointerAction == "release" || g_agentPointerAction == "up";
     const double pulse = clickLike ? std::clamp(1.0 - ageMs / 420.0, 0.0, 1.0) : 0.0;
     const double renderScale = std::max(1.0, static_cast<double>(monitor->m_scale));
     const Vector2D tip{
-        (global.x - monitor->m_position.x) * renderScale,
-        (global.y - monitor->m_position.y) * renderScale,
+        (displayGlobal.x - monitor->m_position.x) * renderScale,
+        (displayGlobal.y - monitor->m_position.y) * renderScale,
     };
     const double renderSize = (CODEX_CURSOR_LOGICAL_SIZE + 2.0 * pulse) * renderScale;
     const auto   texture = codexCursorTexture();
@@ -563,12 +610,6 @@ void renderAgentIndicator(eRenderStage stage) {
     data.tex = texture;
     data.box = CBox{x, y, renderSize, renderSize};
     data.a = static_cast<float>(fade);
-    auto clipBox = windowBox.copy().translate(-monitor->m_position);
-    clipBox.x *= renderScale;
-    clipBox.y *= renderScale;
-    clipBox.w *= renderScale;
-    clipBox.h *= renderScale;
-    data.clipBox = clipBox.round();
     g_pHyprRenderer->m_renderPass.add(makeUnique<CTexPassElement>(std::move(data)));
 }
 
@@ -588,7 +629,7 @@ void scheduleIndicatorAnimation() {
             const auto now = Time::steadyNow();
             const bool animationDone = g_agentPointerUpdated &&
                 std::chrono::duration_cast<std::chrono::milliseconds>(now - *g_agentPointerUpdated).count() > CODEX_CURSOR_ANIMATION_MS;
-            if (!g_agentPointerPosition || !g_pEventLoopManager || animationDone) {
+            if ((!g_agentPointerPosition && !g_agentPointerRelativePosition) || !g_pEventLoopManager || animationDone) {
                 if (g_pEventLoopManager)
                     g_pEventLoopManager->removeTimer(self);
                 if (g_indicatorAnimationTimer.get() == self.get())
@@ -619,6 +660,9 @@ void scheduleIndicatorHide() {
             g_agentPointerPosition.reset();
             g_agentPointerStartPosition.reset();
             g_agentPointerDisplayPosition.reset();
+            g_agentPointerRelativePosition.reset();
+            g_agentPointerRelativeStartPosition.reset();
+            g_agentPointerRelativeDisplayPosition.reset();
             g_agentPointerUpdated.reset();
             g_agentPointerMotionStarted.reset();
             g_agentPointerAction.clear();
@@ -639,15 +683,29 @@ void showAgentIndicator(const PHLWINDOW& targetWindow, const Vector2D& globalPos
 
     const auto oldWindow = g_agentPointerWindow.lock();
     const auto previousDisplay = g_agentPointerDisplayPosition;
+    const auto previousRelativeDisplay = g_agentPointerRelativeDisplayPosition;
     const auto previousTarget = g_agentPointerPosition;
+    const auto previousRelativeTarget = g_agentPointerRelativePosition;
     const auto now = Time::steadyNow();
     Vector2D   motionStart = globalPos;
+    const auto anchor = agentIndicatorWindowAnchor(targetWindow);
+    const auto relative = Vector2D{globalPos.x - anchor.x, globalPos.y - anchor.y};
+    Vector2D   relativeMotionStart = relative;
 
     if (!indicatorActionShouldSnap(action) && oldWindow && oldWindow == targetWindow) {
-        if (previousDisplay && pointInsideBox(*previousDisplay, targetWindow->getFullWindowBoundingBox()))
+        if (previousRelativeDisplay) {
+            relativeMotionStart = *previousRelativeDisplay;
+            motionStart = agentIndicatorGlobalFromRelative(targetWindow, relativeMotionStart);
+        } else if (previousDisplay && pointInsideBox(*previousDisplay, targetWindow->getFullWindowBoundingBox())) {
             motionStart = *previousDisplay;
-        else if (previousTarget && pointInsideBox(*previousTarget, targetWindow->getFullWindowBoundingBox()))
+            relativeMotionStart = Vector2D{motionStart.x - anchor.x, motionStart.y - anchor.y};
+        } else if (previousRelativeTarget) {
+            relativeMotionStart = *previousRelativeTarget;
+            motionStart = agentIndicatorGlobalFromRelative(targetWindow, relativeMotionStart);
+        } else if (previousTarget && pointInsideBox(*previousTarget, targetWindow->getFullWindowBoundingBox())) {
             motionStart = *previousTarget;
+            relativeMotionStart = Vector2D{motionStart.x - anchor.x, motionStart.y - anchor.y};
+        }
     }
 
     damageAgentIndicator();
@@ -655,6 +713,9 @@ void showAgentIndicator(const PHLWINDOW& targetWindow, const Vector2D& globalPos
     g_agentPointerPosition = globalPos;
     g_agentPointerStartPosition = motionStart;
     g_agentPointerDisplayPosition = motionStart;
+    g_agentPointerRelativePosition = relative;
+    g_agentPointerRelativeStartPosition = relativeMotionStart;
+    g_agentPointerRelativeDisplayPosition = relativeMotionStart;
     g_agentPointerUpdated = now;
     g_agentPointerMotionStarted = now;
     g_agentPointerAction = std::string(action);
@@ -1206,6 +1267,27 @@ std::optional<TargetSurface> resolveTargetSurface(const std::string& targetRegex
     return TargetSurface{.window = window, .surface = surface, .local = local};
 }
 
+std::optional<Vector2D> targetPointToGlobal(const std::string& targetRegex, const Vector2D& point, bool windowRelative) {
+    if (!windowRelative)
+        return point;
+    if (!g_pCompositor)
+        return std::nullopt;
+
+    const auto window = g_pCompositor->getWindowByRegex(targetRegex);
+    if (!window || !window->m_isMapped)
+        return std::nullopt;
+
+    const auto box = windowMainSurfaceGoalBox(window);
+    return Vector2D{box.x + point.x, box.y + point.y};
+}
+
+std::optional<TargetSurface> resolveTargetSurfaceForPoint(const std::string& targetRegex, const Vector2D& point, bool windowRelative) {
+    const auto global = targetPointToGlobal(targetRegex, point, windowRelative);
+    if (!global)
+        return std::nullopt;
+    return resolveTargetSurface(targetRegex, *global);
+}
+
 std::optional<TargetSurface> resolveTargetMainSurface(const std::string& targetRegex) {
     if (!g_pCompositor)
         return std::nullopt;
@@ -1368,7 +1450,7 @@ void sendPointerScroll(double dx, double dy) {
     g_pSeatManager->sendPointerFrame();
 }
 
-SDispatchResult dispatchPointer(const std::string& args) {
+SDispatchResult dispatchPointerWithMode(const std::string& args, bool windowRelative) {
     if (!configBool("allow_pointer", true))
         return {.success = false, .error = "hypr-agent-protal pointer dispatch is disabled"};
     if (!g_pSeatManager)
@@ -1377,14 +1459,19 @@ SDispatchResult dispatchPointer(const std::string& args) {
     const auto parts = splitCsv(args);
     if (parts.size() < 4)
         return {.success = false,
-                .error = "usage: hypr-agent-protal:pointer <window-regex>,<global-x>,<global-y>,<move|click|press|release|drag>[,<button>][,<drag-x>,<drag-y>,<duration-sec>]"};
+                .error = "usage: hypr-agent-protal:pointer <window-regex>,<x>,<y>,<move|click|press|release|drag>[,<button>][,<drag-x>,<drag-y>,<duration-sec>]"};
 
     const auto x = parseDouble(parts[1]);
     const auto y = parseDouble(parts[2]);
     if (!x || !y)
         return {.success = false, .error = "pointer coordinates must be finite numbers"};
 
-    const auto target = resolveTargetSurface(parts[0], Vector2D{*x, *y});
+    const Vector2D inputPoint{*x, *y};
+    const auto     globalPoint = targetPointToGlobal(parts[0], inputPoint, windowRelative);
+    if (!globalPoint)
+        return {.success = false, .error = "target window not found"};
+
+    const auto target = resolveTargetSurface(parts[0], *globalPoint);
     if (!target)
         return {.success = false, .error = "target window/surface not found"};
 
@@ -1400,7 +1487,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
 
     if (action == "move" || action == "motion") {
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, *globalPoint, action);
         restore.restoreForTarget(*target);
         return {.success = true};
     }
@@ -1410,7 +1497,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
         const auto dx = parts.size() >= 6 ? parseDouble(parts[5]) : std::optional<double>{0.0};
         if (!dx || !dy)
             return {.success = false, .error = "scroll dx/dy must be finite numbers"};
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, *globalPoint, action);
         sendPointerScroll(*dx, *dy);
         restore.restoreLater(std::chrono::milliseconds(90), false);
         return {.success = true};
@@ -1434,34 +1521,42 @@ SDispatchResult dispatchPointer(const std::string& args) {
         if (g_pEventLoopManager && durationSec > 0.0) {
             struct DragState {
                 std::string                  selector;
+                Vector2D                     start;
                 Vector2D                     end;
+                bool                         windowRelative = false;
                 uint32_t                     button = 0;
                 SP<CWLSurfaceResource>       previousSurface;
                 Vector2D                     previousLocal;
                 std::optional<TargetSurface> lastTarget;
+                Vector2D                     lastGlobal;
             };
 
             auto state = std::make_shared<DragState>();
             state->selector = parts[0];
+            state->start = inputPoint;
             state->end = Vector2D{*x2, *y2};
+            state->windowRelative = windowRelative;
             state->button = *button;
             state->previousSurface = restore.previousSurface;
             state->previousLocal = restore.previousLocal;
             state->lastTarget = *target;
+            state->lastGlobal = *globalPoint;
             restore.restored = true;
 
             const int durationMs = std::max(1, static_cast<int>(std::round(durationSec * 1000.0)));
             for (int step = 1; step <= steps; ++step) {
                 const double   t = static_cast<double>(step) / static_cast<double>(steps);
-                const Vector2D global{*x + ((*x2 - *x) * t), *y + ((*y2 - *y) * t)};
+                const Vector2D point{state->start.x + ((state->end.x - state->start.x) * t), state->start.y + ((state->end.y - state->start.y) * t)};
                 const int      delayMs = std::max(1, static_cast<int>(std::round(durationMs * t)));
                 auto           timer = makeShared<CEventLoopTimer>(
                     std::chrono::milliseconds(delayMs),
-                    [state, global](SP<CEventLoopTimer> self, void*) {
+                    [state, point](SP<CEventLoopTimer> self, void*) {
                         if (g_pSeatManager) {
-                            const auto stepTarget = resolveTargetSurface(state->selector, global);
+                            const auto global = targetPointToGlobal(state->selector, point, state->windowRelative);
+                            const auto stepTarget = global ? resolveTargetSurface(state->selector, *global) : std::optional<TargetSurface>{};
                             if (stepTarget) {
                                 state->lastTarget = *stepTarget;
+                                state->lastGlobal = *global;
                                 g_pSeatManager->setPointerFocus(stepTarget->surface, stepTarget->local);
                                 g_pSeatManager->sendPointerMotion(nowMs(), stepTarget->local);
                                 g_pSeatManager->sendPointerFrame();
@@ -1478,12 +1573,17 @@ SDispatchResult dispatchPointer(const std::string& args) {
                 std::chrono::milliseconds(durationMs + 1),
                 [state](SP<CEventLoopTimer> self, void*) {
                     if (g_pSeatManager && state->lastTarget) {
+                        if (const auto finalGlobal = targetPointToGlobal(state->selector, state->end, state->windowRelative)) {
+                            state->lastGlobal = *finalGlobal;
+                            if (const auto finalTarget = resolveTargetSurface(state->selector, *finalGlobal))
+                                state->lastTarget = *finalTarget;
+                        }
                         const auto target = *state->lastTarget;
                         g_pSeatManager->setPointerFocus(target.surface, target.local);
                         g_pSeatManager->sendPointerMotion(nowMs(), target.local);
                         g_pSeatManager->sendPointerButton(nowMs(), state->button, WL_POINTER_BUTTON_STATE_RELEASED);
                         g_pSeatManager->sendPointerFrame();
-                        showAgentIndicator(target.window, state->end, "drag");
+                        showAgentIndicator(target.window, state->lastGlobal, "drag");
 
                         if (target.window && target.window->m_isX11) {
                             g_pSeatManager->m_state.pointerFocus.reset();
@@ -1501,26 +1601,29 @@ SDispatchResult dispatchPointer(const std::string& args) {
         }
 
         TargetSurface lastTarget = *target;
+        Vector2D      lastGlobal = *globalPoint;
         for (int step = 1; step <= steps; ++step) {
             const double   t = static_cast<double>(step) / static_cast<double>(steps);
-            const Vector2D global{*x + ((*x2 - *x) * t), *y + ((*y2 - *y) * t)};
-            const auto     stepTarget = resolveTargetSurface(parts[0], global);
+            const Vector2D point{inputPoint.x + ((*x2 - inputPoint.x) * t), inputPoint.y + ((*y2 - inputPoint.y) * t)};
+            const auto     global = targetPointToGlobal(parts[0], point, windowRelative);
+            const auto     stepTarget = global ? resolveTargetSurface(parts[0], *global) : std::optional<TargetSurface>{};
             if (!stepTarget)
                 continue;
             lastTarget = *stepTarget;
+            lastGlobal = *global;
             g_pSeatManager->setPointerFocus(lastTarget.surface, lastTarget.local);
             g_pSeatManager->sendPointerMotion(nowMs(), lastTarget.local);
             g_pSeatManager->sendPointerFrame();
         }
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
-        showAgentIndicator(lastTarget.window, Vector2D{*x2, *y2}, action);
+        showAgentIndicator(lastTarget.window, lastGlobal, action);
         restore.restoreForTarget(lastTarget);
         return {.success = true};
     }
 
     if (action == "click") {
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, *globalPoint, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
@@ -1529,7 +1632,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
     }
 
     if (action == "doubleclick" || action == "double-click") {
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, *globalPoint, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
@@ -1541,31 +1644,31 @@ SDispatchResult dispatchPointer(const std::string& args) {
 
         const auto previousSurface = restore.previousSurface;
         const auto previousLocal = restore.previousLocal;
-        const auto targetSurface = target->surface;
-        const auto targetLocal = target->local;
-        const auto targetWindow = PHLWINDOWREF{target->window};
-        const auto targetGlobal = Vector2D{*x, *y};
+        const auto targetSelector = parts[0];
+        const auto targetInput = inputPoint;
+        const bool targetWindowRelative = windowRelative;
         const auto targetButton = *button;
-        const bool resetCurrentXWaylandFocus = target->window && target->window->m_isX11;
         restore.restored = true;
 
         auto timer = makeShared<CEventLoopTimer>(
             std::chrono::milliseconds(180),
-            [previousSurface, previousLocal, targetSurface, targetLocal, targetWindow, targetGlobal, targetButton, resetCurrentXWaylandFocus](SP<CEventLoopTimer> self,
-                                                                                                                                            void*) mutable {
-                if (g_pSeatManager && targetSurface) {
-                    g_pSeatManager->setPointerFocus(targetSurface, targetLocal);
-                    g_pSeatManager->sendPointerMotion(nowMs(), targetLocal);
+            [previousSurface, previousLocal, targetSelector, targetInput, targetWindowRelative, targetButton](SP<CEventLoopTimer> self, void*) mutable {
+                const auto target = resolveTargetSurfaceForPoint(targetSelector, targetInput, targetWindowRelative);
+                if (g_pSeatManager && target) {
+                    g_pSeatManager->setPointerFocus(target->surface, target->local);
+                    g_pSeatManager->sendPointerMotion(nowMs(), target->local);
                     g_pSeatManager->sendPointerButton(nowMs(), targetButton, WL_POINTER_BUTTON_STATE_PRESSED);
                     g_pSeatManager->sendPointerButton(nowMs(), targetButton, WL_POINTER_BUTTON_STATE_RELEASED);
                     g_pSeatManager->sendPointerFrame();
                 }
 
-                if (const auto window = targetWindow.lock())
-                    showAgentIndicator(window, targetGlobal, "doubleclick");
+                if (target) {
+                    const auto targetGlobal = targetPointToGlobal(targetSelector, targetInput, targetWindowRelative);
+                    showAgentIndicator(target->window, targetGlobal.value_or(target->window->getFullWindowBoundingBox().middle()), "doubleclick");
+                }
 
                 if (g_pSeatManager) {
-                    if (resetCurrentXWaylandFocus) {
+                    if (target && target->window && target->window->m_isX11) {
                         g_pSeatManager->m_state.pointerFocus.reset();
                         g_pSeatManager->m_state.pointerFocusResource.reset();
                     }
@@ -1588,7 +1691,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
     }
 
     if (action == "press" || action == "down") {
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, *globalPoint, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_PRESSED);
         g_pSeatManager->sendPointerFrame();
         restore.restoreForTarget(*target);
@@ -1596,7 +1699,7 @@ SDispatchResult dispatchPointer(const std::string& args) {
     }
 
     if (action == "release" || action == "up") {
-        showAgentIndicator(target->window, Vector2D{*x, *y}, action);
+        showAgentIndicator(target->window, *globalPoint, action);
         g_pSeatManager->sendPointerButton(nowMs(), *button, WL_POINTER_BUTTON_STATE_RELEASED);
         g_pSeatManager->sendPointerFrame();
         restore.restoreForTarget(*target);
@@ -1604,6 +1707,14 @@ SDispatchResult dispatchPointer(const std::string& args) {
     }
 
     return {.success = false, .error = "unknown pointer action"};
+}
+
+SDispatchResult dispatchPointer(const std::string& args) {
+    return dispatchPointerWithMode(args, false);
+}
+
+SDispatchResult dispatchPointerRelative(const std::string& args) {
+    return dispatchPointerWithMode(args, true);
 }
 
 SDispatchResult dispatchIndicator(const std::string& args) {
@@ -1821,6 +1932,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:cursor_texture_path", Hyprlang::STRING{""});
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
+    HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer-relative", dispatchPointerRelative);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:indicator", dispatchIndicator);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:keyboard", dispatchKeyboard);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:screenshot", dispatchScreenshot);
@@ -1834,7 +1946,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.42",
+        .version = "0.3.43",
     };
 }
 
@@ -1865,6 +1977,9 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_agentPointerPosition.reset();
     g_agentPointerStartPosition.reset();
     g_agentPointerDisplayPosition.reset();
+    g_agentPointerRelativePosition.reset();
+    g_agentPointerRelativeStartPosition.reset();
+    g_agentPointerRelativeDisplayPosition.reset();
     g_agentPointerUpdated.reset();
     g_agentPointerMotionStarted.reset();
     g_agentPointerAction.clear();

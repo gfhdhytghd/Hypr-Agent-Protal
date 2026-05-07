@@ -121,6 +121,80 @@ def main() -> int:
     near(model_pos["screenshot"]["x"], 100.0)
     near(model_pos["screenshot"]["y"], 100.0)
 
+    original_list_hypr_windows = mcp.list_hypr_windows
+    original_build_app_snapshot = mcp.build_app_snapshot
+    try:
+        moved_snapshot = {
+            "app": {"name": "demo", "bundleIdentifier": "demo", "pid": 1},
+            "target": "address:0xmove",
+            "window": {"address": "0xmove", "class": "demo", "at": [10, 20], "size": [100, 80]},
+            "windowBounds": {"x": 10.0, "y": 20.0, "width": 100.0, "height": 80.0},
+            "screenshot": {"width": 100, "height": 80, "logicalBounds": {"x": 10.0, "y": 20.0, "width": 100.0, "height": 80.0}},
+            "elements": [{"index": 3, "source": "atspi", "controlType": "push button", "name": "OK", "frame": {"x": 20.0, "y": 10.0, "width": 20.0, "height": 20.0}}],
+            "treeLines": [],
+            "uiHints": {},
+            "accessibility": {"status": "ok"},
+        }
+        mcp.SNAPSHOTS.clear()
+        mcp.SNAPSHOTS["demo"] = moved_snapshot
+        mcp.list_hypr_windows = lambda: [{"address": "0xmove", "class": "demo", "at": [45, 60], "size": [100, 80], "mapped": True, "hidden": False}]
+        shifted = mcp.current_snapshot("demo")
+        near(shifted["screenshot"]["logicalBounds"]["x"], 45.0)
+        near(shifted["screenshot"]["logicalBounds"]["y"], 60.0)
+        near(mcp.screenshot_point_to_global(shifted, 30, 20)[0], 75.0)
+        near(mcp.screenshot_point_to_global(shifted, 30, 20)[1], 80.0)
+
+        resized_snapshot = {
+            **moved_snapshot,
+            "target": "address:0xresize",
+            "window": {"address": "0xresize", "class": "demo", "at": [10, 20], "size": [100, 80]},
+            "windowBounds": {"x": 10.0, "y": 20.0, "width": 100.0, "height": 80.0},
+            "elements": [
+                {
+                    "index": 3,
+                    "runtimeId": [0, 1, 2],
+                    "automationId": "ok-button",
+                    "source": "atspi",
+                    "controlType": "push button",
+                    "name": "OK",
+                    "frame": {"x": 20.0, "y": 10.0, "width": 20.0, "height": 20.0},
+                }
+            ],
+        }
+        rebuilt_snapshot = {
+            **resized_snapshot,
+            "target": "address:0xresize",
+            "window": {"address": "0xresize", "class": "demo", "at": [10, 20], "size": [180, 120]},
+            "windowBounds": {"x": 10.0, "y": 20.0, "width": 180.0, "height": 120.0},
+            "screenshot": {"width": 180, "height": 120, "logicalBounds": {"x": 10.0, "y": 20.0, "width": 180.0, "height": 120.0}},
+            "elements": [
+                {"index": 0, "source": "atspi", "controlType": "frame", "name": "Demo", "frame": {"x": 0.0, "y": 0.0, "width": 180.0, "height": 120.0}},
+                {
+                    "index": 9,
+                    "runtimeId": [0, 1, 2],
+                    "automationId": "ok-button",
+                    "source": "atspi",
+                    "controlType": "push button",
+                    "name": "OK",
+                    "frame": {"x": 80.0, "y": 60.0, "width": 30.0, "height": 24.0},
+                },
+            ],
+        }
+        mcp.SNAPSHOTS.clear()
+        mcp.SNAPSHOTS["demo"] = resized_snapshot
+        mcp.list_hypr_windows = lambda: [{"address": "0xresize", "class": "demo", "at": [10, 20], "size": [180, 120], "mapped": True, "hidden": False}]
+        mcp.build_app_snapshot = lambda app: rebuilt_snapshot
+        element_snapshot, element, refresh = mcp.element_snapshot_for_action("demo", "3")
+        assert element_snapshot is rebuilt_snapshot
+        assert element["index"] == 9
+        assert refresh["geometryRefresh"]["change"] == "resized"
+        assert refresh["elementRematch"]["matched"] is True
+        assert "runtimeId" in refresh["elementRematch"]["matchedBy"]
+    finally:
+        mcp.SNAPSHOTS.clear()
+        mcp.list_hypr_windows = original_list_hypr_windows
+        mcp.build_app_snapshot = original_build_app_snapshot
+
     original_related_windows_for = mcp.related_windows_for
     try:
         mcp.related_windows_for = lambda target: [

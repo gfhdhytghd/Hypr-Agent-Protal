@@ -417,12 +417,19 @@ def pointer(args: argparse.Namespace) -> int:
             print("drag requires x2 and y2", file=sys.stderr)
             return 2
         payload = ",".join([args.target, str(args.x), str(args.y), args.action, args.button, str(args.x2), str(args.y2), str(max(0.0, min(args.duration, 3.0)))])
-    result = dispatch(args.dispatcher, payload)
+    dispatcher = args.dispatcher
+    if args.relative and dispatcher == "hypr-agent-protal:pointer":
+        dispatcher = "hypr-agent-protal:pointer-relative"
+    result = dispatch(dispatcher, payload)
     if result.returncode != 0:
         print(result.stderr or result.stdout, file=sys.stderr, end="")
         return result.returncode or 1
     cursor_x = args.x2 if args.action == "drag" and args.x2 is not None else args.x
     cursor_y = args.y2 if args.action == "drag" and args.y2 is not None else args.y
+    if args.relative:
+        global_cursor = window_relative_to_global(args.target, cursor_x, cursor_y)
+        if global_cursor is not None:
+            cursor_x, cursor_y = global_cursor
     write_agent_cursor(cursor_state_path(), target=args.target, x=cursor_x, y=cursor_y, action=args.action, button=args.button)
     if args.json:
         print(
@@ -437,6 +444,9 @@ def pointer(args: argparse.Namespace) -> int:
                     "action": args.action,
                     "button": args.button,
                     "duration": args.duration,
+                    "coordinateSpace": "window" if args.relative else "global",
+                    "cursorX": cursor_x,
+                    "cursorY": cursor_y,
                 }
             )
         )
@@ -539,6 +549,33 @@ def selector_matches(client: dict, selector: str) -> bool:
         return selector in haystack
 
 
+def client_for_selector(selector: str) -> dict | None:
+    result = hyprctl("clients", "-j")
+    if result.returncode != 0:
+        return None
+    try:
+        clients = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    for client in clients:
+        if isinstance(client, dict) and selector_matches(client, selector):
+            return client
+    return None
+
+
+def window_relative_to_global(selector: str, x: float, y: float) -> tuple[float, float] | None:
+    client = client_for_selector(selector)
+    if client is None:
+        return None
+    at = client.get("at")
+    if not isinstance(at, list) or len(at) < 2:
+        return None
+    try:
+        return float(at[0]) + float(x), float(at[1]) + float(y)
+    except (TypeError, ValueError):
+        return None
+
+
 def is_related_window(client: dict, target: dict) -> bool:
     if client.get("address") == target.get("address"):
         return True
@@ -589,14 +626,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     ptr = sub.add_parser("pointer", help="send pointer input to a target window")
     ptr.add_argument("target", help="Hyprland window regex, for example address:0x1234")
-    ptr.add_argument("x", type=float, help="global logical x coordinate")
-    ptr.add_argument("y", type=float, help="global logical y coordinate")
+    ptr.add_argument("x", type=float, help="global logical x coordinate, or window-relative x with --relative")
+    ptr.add_argument("y", type=float, help="global logical y coordinate, or window-relative y with --relative")
     ptr.add_argument("action", choices=["move", "motion", "click", "doubleclick", "double-click", "press", "down", "release", "up", "scroll", "drag"])
     ptr.add_argument("button", nargs="?", default="left", help="button name, or vertical wheel ticks for scroll")
-    ptr.add_argument("x2", nargs="?", type=float, help="destination global logical x coordinate for drag")
-    ptr.add_argument("y2", nargs="?", type=float, help="destination global logical y coordinate for drag")
+    ptr.add_argument("x2", nargs="?", type=float, help="destination global logical x coordinate for drag, or window-relative x with --relative")
+    ptr.add_argument("y2", nargs="?", type=float, help="destination global logical y coordinate for drag, or window-relative y with --relative")
     ptr.add_argument("--dx", type=float, help="horizontal wheel ticks for scroll")
     ptr.add_argument("--duration", type=float, default=0.2, help="drag pacing duration in seconds")
+    ptr.add_argument("--relative", action="store_true", help="interpret x/y and drag destination as window-relative logical coordinates")
     ptr.add_argument("--dispatcher", default="hypr-agent-protal:pointer")
     ptr.add_argument("--json", action="store_true")
     ptr.set_defaults(func=pointer)
