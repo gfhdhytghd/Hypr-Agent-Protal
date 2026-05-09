@@ -1,5 +1,6 @@
 #include "plugin/screenshot_capture.hpp"
 
+#include <hyprland/src/config/ConfigManager.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
 
@@ -87,6 +88,15 @@ struct SPluginConfig {
 
 SPluginConfig g_config;
 
+constexpr const char* LUA_CONFIG_ALLOW_POINTER             = "plugin.hypr_agent_protal.allow_pointer";
+constexpr const char* LUA_CONFIG_ALLOW_KEYBOARD            = "plugin.hypr_agent_protal.allow_keyboard";
+constexpr const char* LUA_CONFIG_ALLOW_SCREENSHOT          = "plugin.hypr_agent_protal.allow_screenshot";
+constexpr const char* LUA_CONFIG_ALLOW_SESSION             = "plugin.hypr_agent_protal.allow_session";
+constexpr const char* LUA_CONFIG_SHOW_INDICATOR            = "plugin.hypr_agent_protal.show_indicator";
+constexpr const char* LUA_CONFIG_INDICATOR_TIMEOUT_MS      = "plugin.hypr_agent_protal.indicator_timeout_ms";
+constexpr const char* LUA_CONFIG_KEYBOARD_RESTORE_DELAY_MS = "plugin.hypr_agent_protal.keyboard_restore_delay_ms";
+constexpr const char* LUA_CONFIG_CURSOR_TEXTURE_PATH       = "plugin.hypr_agent_protal.cursor_texture_path";
+
 constexpr int    CODEX_CURSOR_TEXTURE_SIZE = 160;
 constexpr int    CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE = 252;
 constexpr double CODEX_CURSOR_HOTSPOT_X = 76.6;
@@ -104,7 +114,27 @@ bool registerConfigValue(SP<Config::Values::IValue> value) {
     return HyprlandAPI::addConfigValueV2(g_pluginHandle, std::move(value));
 }
 
+bool usingLegacyConfig() {
+    return Config::mgr() && Config::mgr()->type() == Config::CONFIG_LEGACY;
+}
+
+template <typename T>
+T legacyConfigValue(const std::string& name, T fallback) {
+    const auto value = HyprlandAPI::getConfigValue(g_pluginHandle, name);
+    if (!value)
+        return fallback;
+
+    try {
+        return std::any_cast<T>(value->getValue());
+    } catch (const std::bad_any_cast&) {
+        return fallback;
+    }
+}
+
 bool configBool(const std::string& suffix, bool fallback) {
+    if (usingLegacyConfig())
+        return legacyConfigValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback ? 1 : 0) != 0;
+
     if (suffix == "allow_pointer" && g_config.allowPointer)
         return g_config.allowPointer->value();
     if (suffix == "allow_keyboard" && g_config.allowKeyboard)
@@ -120,6 +150,9 @@ bool configBool(const std::string& suffix, bool fallback) {
 }
 
 int configInt(const std::string& suffix, int fallback) {
+    if (usingLegacyConfig())
+        return static_cast<int>(legacyConfigValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback));
+
     if (suffix == "indicator_timeout_ms" && g_config.indicatorTimeoutMs)
         return static_cast<int>(g_config.indicatorTimeoutMs->value());
     if (suffix == "keyboard_restore_delay_ms" && g_config.keyboardRestoreDelayMs)
@@ -129,6 +162,18 @@ int configInt(const std::string& suffix, int fallback) {
 }
 
 std::string configString(const std::string& suffix, const std::string& fallback) {
+    if (usingLegacyConfig()) {
+        const auto value = HyprlandAPI::getConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:" + suffix);
+        if (!value)
+            return fallback;
+
+        try {
+            return std::string{std::any_cast<Hyprlang::STRING>(value->getValue())};
+        } catch (const std::bad_any_cast&) {
+            return fallback;
+        }
+    }
+
     if (suffix == "cursor_texture_path" && g_config.cursorTexturePath)
         return g_config.cursorTexturePath->value();
 
@@ -136,18 +181,30 @@ std::string configString(const std::string& suffix, const std::string& fallback)
 }
 
 void registerPluginConfig() {
+    if (usingLegacyConfig()) {
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_pointer", Hyprlang::INT{1});
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_keyboard", Hyprlang::INT{1});
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_screenshot", Hyprlang::INT{1});
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_session", Hyprlang::INT{1});
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:show_indicator", Hyprlang::INT{1});
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:indicator_timeout_ms", Hyprlang::INT{30000});
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:keyboard_restore_delay_ms", Hyprlang::INT{700});
+        HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:cursor_texture_path", Hyprlang::STRING{""});
+        return;
+    }
+
     using namespace Config::Values;
 
-    g_config.allowPointer          = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_pointer", "allow background pointer dispatchers", true);
-    g_config.allowKeyboard         = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_keyboard", "allow background keyboard dispatchers", true);
-    g_config.allowScreenshot       = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_screenshot", "allow compositor screenshot dispatchers", true);
-    g_config.allowSession          = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_session", "allow workspace session dispatchers", true);
-    g_config.showIndicator         = makeShared<CBoolValue>("plugin:hypr-agent-protal:show_indicator", "show the visible agent cursor indicator", true);
-    g_config.indicatorTimeoutMs    = makeShared<CIntValue>("plugin:hypr-agent-protal:indicator_timeout_ms", "visible agent cursor timeout in milliseconds", Config::INTEGER{30000});
-    g_config.keyboardRestoreDelayMs = makeShared<CIntValue>("plugin:hypr-agent-protal:keyboard_restore_delay_ms",
+    g_config.allowPointer          = makeShared<CBoolValue>(LUA_CONFIG_ALLOW_POINTER, "allow background pointer dispatchers", true);
+    g_config.allowKeyboard         = makeShared<CBoolValue>(LUA_CONFIG_ALLOW_KEYBOARD, "allow background keyboard dispatchers", true);
+    g_config.allowScreenshot       = makeShared<CBoolValue>(LUA_CONFIG_ALLOW_SCREENSHOT, "allow compositor screenshot dispatchers", true);
+    g_config.allowSession          = makeShared<CBoolValue>(LUA_CONFIG_ALLOW_SESSION, "allow workspace session dispatchers", true);
+    g_config.showIndicator         = makeShared<CBoolValue>(LUA_CONFIG_SHOW_INDICATOR, "show the visible agent cursor indicator", true);
+    g_config.indicatorTimeoutMs    = makeShared<CIntValue>(LUA_CONFIG_INDICATOR_TIMEOUT_MS, "visible agent cursor timeout in milliseconds", Config::INTEGER{30000});
+    g_config.keyboardRestoreDelayMs = makeShared<CIntValue>(LUA_CONFIG_KEYBOARD_RESTORE_DELAY_MS,
                                                             "delay before restoring keyboard focus after modified shortcuts", Config::INTEGER{700});
     g_config.cursorTexturePath =
-        makeShared<CStringValue>("plugin:hypr-agent-protal:cursor_texture_path", "raw ABGR cursor texture path", Config::STRING{""});
+        makeShared<CStringValue>(LUA_CONFIG_CURSOR_TEXTURE_PATH, "raw ABGR cursor texture path", Config::STRING{""});
 
     const auto registerOrReset = [](auto& value) {
         if (!registerConfigValue(value))

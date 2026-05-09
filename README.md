@@ -284,8 +284,8 @@ plugin {
 }
 ```
 
-With Hyprland v0.55 Lua config, plugin config keys are written under
-`plugin.hypr_agent_protal`:
+With Hyprland Lua config, plugin config keys are written under
+`plugin.hypr_agent_protal` because Lua normalizes the plugin namespace:
 
 ```lua
 hl.config({
