@@ -1,6 +1,7 @@
 #include "plugin/screenshot_capture.hpp"
 
 #include <hyprland/src/config/ConfigManager.hpp>
+#include <hyprland/src/config/lua/bindings/LuaBindingsInternal.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/config/values/ConfigValues.hpp>
 
@@ -20,8 +21,10 @@
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
-#include <lua.h>
+extern "C" {
 #include <lauxlib.h>
+#include <lua.h>
+}
 #include <hyprutils/signal/Listener.hpp>
 
 #include <algorithm>
@@ -2065,12 +2068,7 @@ SDispatchResult dispatchLuaPayload(eLuaDispatcher dispatcher, const std::string&
     return {.success = false, .error = "unknown hypr-agent-protal lua dispatcher"};
 }
 
-int luaDispatchClosure(lua_State* L) {
-    const auto dispatcher = static_cast<eLuaDispatcher>(lua_tointeger(L, lua_upvalueindex(1)));
-    const auto payloadArg = lua_tostring(L, lua_upvalueindex(2));
-    const auto payload    = std::string{payloadArg ? payloadArg : ""};
-    const auto result     = dispatchLuaPayload(dispatcher, payload);
-
+int pushLuaDispatchResult(lua_State* L, const SDispatchResult& result) {
     lua_newtable(L);
     lua_pushboolean(L, result.success);
     lua_setfield(L, -2, "ok");
@@ -2083,12 +2081,19 @@ int luaDispatchClosure(lua_State* L) {
     return 1;
 }
 
+int luaDispatchClosure(lua_State* L) {
+    const auto dispatcher = static_cast<eLuaDispatcher>(lua_tointeger(L, lua_upvalueindex(1)));
+    const auto payloadArg = lua_tostring(L, lua_upvalueindex(2));
+    const auto payload    = std::string{payloadArg ? payloadArg : ""};
+    return pushLuaDispatchResult(L, dispatchLuaPayload(dispatcher, payload));
+}
+
 int makeLuaDispatcher(lua_State* L, eLuaDispatcher dispatcher) {
     const auto* payload = luaL_checkstring(L, 1);
     lua_pushinteger(L, static_cast<lua_Integer>(dispatcher));
-    lua_pushstring(L, payload);
+    lua_pushstring(L, payload ? payload : "");
     lua_pushcclosure(L, luaDispatchClosure, 2);
-    return 1;
+    return Config::Lua::Bindings::Internal::wrapDispatcher(L);
 }
 
 int luaPointer(lua_State* L) {
