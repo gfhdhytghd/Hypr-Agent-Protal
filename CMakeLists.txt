@@ -25,6 +25,50 @@ pkg_check_modules(HYPR_DEPS REQUIRED hyprland)
 find_package(nlohmann_json REQUIRED)
 find_package(Python3 COMPONENTS Interpreter)
 
+set(HYPRLAND_SOURCE_DIR "" CACHE PATH "Optional Hyprland source checkout to build against")
+if(HYPRLAND_SOURCE_DIR)
+  get_filename_component(HYPRLAND_SOURCE_DIR "${HYPRLAND_SOURCE_DIR}" ABSOLUTE)
+  set(HYPRLAND_SOURCE_INCLUDE_DIR "${CMAKE_BINARY_DIR}/hyprland-source-include")
+  file(MAKE_DIRECTORY "${HYPRLAND_SOURCE_INCLUDE_DIR}")
+  file(REMOVE "${HYPRLAND_SOURCE_INCLUDE_DIR}/hyprland")
+  execute_process(COMMAND "${CMAKE_COMMAND}" -E create_symlink "${HYPRLAND_SOURCE_DIR}" "${HYPRLAND_SOURCE_INCLUDE_DIR}/hyprland")
+  list(PREPEND HYPR_DEPS_INCLUDE_DIRS
+    "${HYPRLAND_SOURCE_INCLUDE_DIR}"
+    "${HYPRLAND_SOURCE_DIR}/src"
+    "${HYPRLAND_SOURCE_DIR}/protocols"
+  )
+endif()
+
+foreach(HYPRLAND_INCLUDE_DIR ${HYPR_DEPS_INCLUDE_DIRS})
+  foreach(HYPRLAND_DERIVED_INCLUDE_DIR
+      "${HYPRLAND_INCLUDE_DIR}/hyprland/src"
+      "${HYPRLAND_INCLUDE_DIR}/hyprland/protocols"
+      "${HYPRLAND_INCLUDE_DIR}/src"
+      "${HYPRLAND_INCLUDE_DIR}/protocols")
+    if(EXISTS "${HYPRLAND_DERIVED_INCLUDE_DIR}")
+      list(APPEND HYPR_DEPS_INCLUDE_DIRS "${HYPRLAND_DERIVED_INCLUDE_DIR}")
+    endif()
+  endforeach()
+endforeach()
+
+if(NOT HYPRLAND_SOURCE_DIR)
+  set(HYPRLAND_FOUND_PLUGIN_API FALSE)
+  foreach(HYPRLAND_INCLUDE_DIR ${HYPR_DEPS_INCLUDE_DIRS})
+    if(EXISTS "${HYPRLAND_INCLUDE_DIR}/hyprland/src/plugins/PluginAPI.hpp")
+      set(HYPRLAND_FOUND_PLUGIN_API TRUE)
+    endif()
+  endforeach()
+  if(NOT HYPRLAND_FOUND_PLUGIN_API AND EXISTS "/usr/include/hyprland/src/plugins/PluginAPI.hpp")
+    list(APPEND HYPR_DEPS_INCLUDE_DIRS
+      /usr/include
+      /usr/include/hyprland
+      /usr/include/hyprland/src
+      /usr/include/hyprland/protocols
+    )
+  endif()
+endif()
+list(REMOVE_DUPLICATES HYPR_DEPS_INCLUDE_DIRS)
+
 add_library(hypr_agent_protal SHARED
   src/plugin/main.cpp
   src/plugin/screenshot_capture.cpp

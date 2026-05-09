@@ -29,6 +29,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ```
 
+To build against the local Hyprland v0.55 preview checkout:
+
+```sh
+PKG_CONFIG_PATH="$HOME/data/Hyprland/build${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" cmake -S . -B build-v055 -DCMAKE_BUILD_TYPE=Debug -DHYPRLAND_SOURCE_DIR="$HOME/data/Hyprland"
+cmake --build build-v055
+```
+
 Install or load `build/libhypr-agent-protal.so` as a Hyprland plugin. With hyprpm:
 
 ```sh
@@ -275,6 +282,26 @@ plugin {
     # cursor_texture_path = ~/.config/hypr-agent-protal/codex-cursor-252.abgr
   }
 }
+```
+
+With Hyprland v0.55 Lua config, plugin config keys are written under
+`plugin.hypr_agent_protal`:
+
+```lua
+hl.config({
+  plugin = {
+    hypr_agent_protal = {
+      allow_screenshot = true,
+      allow_pointer = true,
+      allow_keyboard = true,
+      allow_session = true,
+      show_indicator = true,
+      indicator_timeout_ms = 30000,
+      keyboard_restore_delay_ms = 700,
+      -- cursor_texture_path = "~/.config/hypr-agent-protal/codex-cursor-252.abgr",
+    },
+  },
+})
 ```
 
 The visible cursor uses `~/.config/hypr-agent-protal/codex-cursor-252.abgr` when present, and otherwise falls back to a procedural texture. Install an extracted Codex Computer Use cursor PNG into that local raw format with:

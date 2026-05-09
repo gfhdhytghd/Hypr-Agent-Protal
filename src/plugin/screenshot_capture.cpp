@@ -3,6 +3,7 @@
 #include <hyprland/src/plugins/PluginAPI.hpp>
 
 #define private public
+#define protected public
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
@@ -10,6 +11,8 @@
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
+#include <hyprland/src/render/gl/GLFramebuffer.hpp>
+#undef protected
 #undef private
 
 #include <GLES2/gl2.h>
@@ -31,6 +34,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+
+using Render::GL::g_pHyprOpenGL;
 
 namespace hypr_agent_protal {
 namespace {
@@ -172,7 +177,7 @@ bool prepareRgbaReadbackRegion(int framebufferWidth,
     return true;
 }
 
-RgbaReadback readRgbaFramebufferRegion(CFramebuffer& framebuffer, int cropX, int cropTopY, int cropWidth, int cropHeight) {
+RgbaReadback readRgbaFramebufferRegion(Render::GL::CGLFramebuffer& framebuffer, int cropX, int cropTopY, int cropWidth, int cropHeight) {
     const int framebufferWidth = positiveRoundedIntFromDouble(framebuffer.m_size.x);
     const int framebufferHeight = positiveRoundedIntFromDouble(framebuffer.m_size.y);
     RgbaReadbackRegion region;
@@ -419,30 +424,31 @@ bool renderMonitorArtifact(const PHLMONITOR& monitor, const Time::steady_tp& fro
     if (!checkedRgbaByteSize(width, height, framebufferBytes))
         return false;
 
-    CFramebuffer framebuffer;
+    auto       framebuffer = makeShared<Render::GL::CGLFramebuffer>();
     const auto   drmFormat = monitor->m_output && monitor->m_output->state ? monitor->m_output->state->state().drmFormat : DRM_FORMAT_ABGR8888;
-    if (!framebuffer.alloc(width, height, drmFormat) && !framebuffer.alloc(width, height, DRM_FORMAT_ABGR8888))
+    if (!framebuffer->alloc(width, height, drmFormat) && !framebuffer->alloc(width, height, DRM_FORMAT_ABGR8888))
         return false;
 
     const bool previousBlockFeedback = g_pHyprRenderer->m_bBlockSurfaceFeedback;
-    const bool previousBlockShader = g_pHyprOpenGL->m_renderData.blockScreenShader;
+    const bool previousBlockShader = g_pHyprRenderer->m_renderData.blockScreenShader;
     CRegion    fakeDamage{0, 0, width, height};
 
-    g_pHyprRenderer->makeEGLCurrent();
+    g_pHyprOpenGL->makeEGLCurrent();
     g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
-    if (!g_pHyprRenderer->beginRender(monitor, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &framebuffer)) {
+    if (!g_pHyprRenderer->beginRender(monitor, fakeDamage, Render::RENDER_MODE_FULL_FAKE, nullptr, framebuffer)) {
         g_pHyprRenderer->m_bBlockSurfaceFeedback = previousBlockFeedback;
         return false;
     }
 
-    g_pHyprOpenGL->clear(CHyprColor{0.0, 0.0, 0.0, 1.0});
+    glClearColor(0.F, 0.F, 0.F, 1.F);
+    glClear(GL_COLOR_BUFFER_BIT);
     g_pHyprRenderer->renderWorkspace(monitor, monitor->m_activeWorkspace, frozenTime, CBox{0, 0, static_cast<double>(width), static_cast<double>(height)});
-    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+    g_pHyprRenderer->m_renderData.blockScreenShader = true;
     g_pHyprRenderer->endRender();
-    g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockShader;
+    g_pHyprRenderer->m_renderData.blockScreenShader = previousBlockShader;
     g_pHyprRenderer->m_bBlockSurfaceFeedback = previousBlockFeedback;
 
-    const auto readback = readRgbaFramebufferRegion(framebuffer, 0, 0, width, height);
+    const auto readback = readRgbaFramebufferRegion(*framebuffer, 0, 0, width, height);
     return !readback.pixels.empty() && writeFileExclusive(path, readback.pixels);
 }
 
@@ -476,19 +482,19 @@ bool renderWindowArtifact(const PHLWINDOW& window,
     windowGoal.setPositionOffset(renderOffset);
     CBox renderCropBox = fullBox.copy().translate(renderOffset).translate(-monitor->m_position).scale(scale).round();
 
-    CFramebuffer framebuffer;
+    auto       framebuffer = makeShared<Render::GL::CGLFramebuffer>();
     const auto   drmFormat = monitor->m_output && monitor->m_output->state ? monitor->m_output->state->state().drmFormat : DRM_FORMAT_ABGR8888;
-    if (!framebuffer.alloc(framebufferWidth, framebufferHeight, DRM_FORMAT_ABGR8888) && !framebuffer.alloc(framebufferWidth, framebufferHeight, drmFormat))
+    if (!framebuffer->alloc(framebufferWidth, framebufferHeight, DRM_FORMAT_ABGR8888) && !framebuffer->alloc(framebufferWidth, framebufferHeight, drmFormat))
         return false;
 
     const bool previousBlockFeedback = g_pHyprRenderer->m_bBlockSurfaceFeedback;
-    const bool previousBlockShader = g_pHyprOpenGL->m_renderData.blockScreenShader;
+    const bool previousBlockShader = g_pHyprRenderer->m_renderData.blockScreenShader;
     const bool previousRenderingSnapshot = g_pHyprRenderer->m_bRenderingSnapshot;
     CRegion    fakeDamage{0, 0, framebufferWidth, framebufferHeight};
 
-    g_pHyprRenderer->makeEGLCurrent();
+    g_pHyprOpenGL->makeEGLCurrent();
     g_pHyprRenderer->m_bBlockSurfaceFeedback = true;
-    if (!g_pHyprRenderer->beginRender(monitor, fakeDamage, RENDER_MODE_FULL_FAKE, nullptr, &framebuffer)) {
+    if (!g_pHyprRenderer->beginRender(monitor, fakeDamage, Render::RENDER_MODE_FULL_FAKE, nullptr, framebuffer)) {
         g_pHyprRenderer->m_bBlockSurfaceFeedback = previousBlockFeedback;
         return false;
     }
@@ -496,19 +502,20 @@ bool renderWindowArtifact(const PHLWINDOW& window,
     g_pHyprRenderer->m_bRenderingSnapshot = true;
     {
         FullSurfaceVisibleRegionOverride fullVisibleRegion(window);
-        g_pHyprOpenGL->clear(CHyprColor{0.0, 0.0, 0.0, 0.0});
-        g_pHyprRenderer->renderWindow(window, monitor, frozenTime, true, RENDER_PASS_ALL, false, false);
+        glClearColor(0.F, 0.F, 0.F, 0.F);
+        glClear(GL_COLOR_BUFFER_BIT);
+        g_pHyprRenderer->renderWindow(window, monitor, frozenTime, true, Render::RENDER_PASS_ALL, false, false);
     }
     g_pHyprRenderer->m_bRenderingSnapshot = previousRenderingSnapshot;
 
-    g_pHyprOpenGL->m_renderData.blockScreenShader = true;
+    g_pHyprRenderer->m_renderData.blockScreenShader = true;
     g_pHyprRenderer->endRender();
-    g_pHyprOpenGL->m_renderData.blockScreenShader = previousBlockShader;
+    g_pHyprRenderer->m_renderData.blockScreenShader = previousBlockShader;
     g_pHyprRenderer->m_bBlockSurfaceFeedback = previousBlockFeedback;
 
     const int cropX = clampedIntFromDouble(renderCropBox.x);
     const int cropY = clampedIntFromDouble(renderCropBox.y);
-    auto      readback = readRgbaFramebufferRegion(framebuffer, cropX, cropY, width, height);
+    auto      readback = readRgbaFramebufferRegion(*framebuffer, cropX, cropY, width, height);
     if (readback.pixels.empty())
         return false;
 

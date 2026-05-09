@@ -1,6 +1,7 @@
 #include "plugin/screenshot_capture.hpp"
 
 #include <hyprland/src/plugins/PluginAPI.hpp>
+#include <hyprland/src/config/values/ConfigValues.hpp>
 
 #define private public
 #include <hyprland/src/Compositor.hpp>
@@ -13,6 +14,7 @@
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/Texture.hpp>
+#include <hyprland/src/render/gl/GLTexture.hpp>
 #include <hyprland/src/render/pass/TexPassElement.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
@@ -47,6 +49,8 @@ inline HANDLE g_pluginHandle = nullptr;
 
 namespace {
 
+using Render::GL::g_pHyprOpenGL;
+
 std::vector<SP<CEventLoopTimer>> g_pointerRestoreTimers;
 std::vector<SP<CEventLoopTimer>> g_keyboardRestoreTimers;
 std::vector<SP<CEventLoopTimer>> g_workspaceRestackTimers;
@@ -65,10 +69,23 @@ std::optional<Vector2D>          g_agentPointerRelativeDisplayPosition;
 std::optional<Time::steady_tp>   g_agentPointerUpdated;
 std::optional<Time::steady_tp>   g_agentPointerMotionStarted;
 std::string                      g_agentPointerAction;
-SP<CTexture>                     g_codexCursorTexture;
+SP<Render::ITexture>             g_codexCursorTexture;
 Vector2D                         g_codexCursorTextureSize;
 double                           g_codexCursorHotspotX = 0.0;
 double                           g_codexCursorHotspotY = 0.0;
+
+struct SPluginConfig {
+    SP<Config::Values::CBoolValue>   allowPointer;
+    SP<Config::Values::CBoolValue>   allowKeyboard;
+    SP<Config::Values::CBoolValue>   allowScreenshot;
+    SP<Config::Values::CBoolValue>   allowSession;
+    SP<Config::Values::CBoolValue>   showIndicator;
+    SP<Config::Values::CIntValue>    indicatorTimeoutMs;
+    SP<Config::Values::CIntValue>    keyboardRestoreDelayMs;
+    SP<Config::Values::CStringValue> cursorTexturePath;
+};
+
+SPluginConfig g_config;
 
 constexpr int    CODEX_CURSOR_TEXTURE_SIZE = 160;
 constexpr int    CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE = 252;
@@ -80,37 +97,71 @@ constexpr double CODEX_CURSOR_LOGICAL_SIZE = 128.0;
 constexpr double CODEX_CURSOR_MOTION_MS = 1429.1667;
 constexpr double CODEX_CURSOR_ANIMATION_MS = 1680.0;
 
-template <typename T>
-T configValue(const std::string& name, T fallback) {
-    const auto value = HyprlandAPI::getConfigValue(g_pluginHandle, name);
+bool registerConfigValue(SP<Config::Values::IValue> value) {
     if (!value)
-        return fallback;
+        return false;
 
-    try {
-        return std::any_cast<T>(value->getValue());
-    } catch (const std::bad_any_cast&) {
-        return fallback;
-    }
+    return HyprlandAPI::addConfigValueV2(g_pluginHandle, std::move(value));
 }
 
 bool configBool(const std::string& suffix, bool fallback) {
-    return configValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback ? 1 : 0) != 0;
+    if (suffix == "allow_pointer" && g_config.allowPointer)
+        return g_config.allowPointer->value();
+    if (suffix == "allow_keyboard" && g_config.allowKeyboard)
+        return g_config.allowKeyboard->value();
+    if (suffix == "allow_screenshot" && g_config.allowScreenshot)
+        return g_config.allowScreenshot->value();
+    if (suffix == "allow_session" && g_config.allowSession)
+        return g_config.allowSession->value();
+    if (suffix == "show_indicator" && g_config.showIndicator)
+        return g_config.showIndicator->value();
+
+    return fallback;
 }
 
 int configInt(const std::string& suffix, int fallback) {
-    return static_cast<int>(configValue<Hyprlang::INT>("plugin:hypr-agent-protal:" + suffix, fallback));
+    if (suffix == "indicator_timeout_ms" && g_config.indicatorTimeoutMs)
+        return static_cast<int>(g_config.indicatorTimeoutMs->value());
+    if (suffix == "keyboard_restore_delay_ms" && g_config.keyboardRestoreDelayMs)
+        return static_cast<int>(g_config.keyboardRestoreDelayMs->value());
+
+    return fallback;
 }
 
 std::string configString(const std::string& suffix, const std::string& fallback) {
-    const auto value = HyprlandAPI::getConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:" + suffix);
-    if (!value)
-        return fallback;
+    if (suffix == "cursor_texture_path" && g_config.cursorTexturePath)
+        return g_config.cursorTexturePath->value();
 
-    try {
-        return std::string{std::any_cast<Hyprlang::STRING>(value->getValue())};
-    } catch (const std::bad_any_cast&) {
-        return fallback;
-    }
+    return fallback;
+}
+
+void registerPluginConfig() {
+    using namespace Config::Values;
+
+    g_config.allowPointer          = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_pointer", "allow background pointer dispatchers", true);
+    g_config.allowKeyboard         = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_keyboard", "allow background keyboard dispatchers", true);
+    g_config.allowScreenshot       = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_screenshot", "allow compositor screenshot dispatchers", true);
+    g_config.allowSession          = makeShared<CBoolValue>("plugin:hypr-agent-protal:allow_session", "allow workspace session dispatchers", true);
+    g_config.showIndicator         = makeShared<CBoolValue>("plugin:hypr-agent-protal:show_indicator", "show the visible agent cursor indicator", true);
+    g_config.indicatorTimeoutMs    = makeShared<CIntValue>("plugin:hypr-agent-protal:indicator_timeout_ms", "visible agent cursor timeout in milliseconds", Config::INTEGER{30000});
+    g_config.keyboardRestoreDelayMs = makeShared<CIntValue>("plugin:hypr-agent-protal:keyboard_restore_delay_ms",
+                                                            "delay before restoring keyboard focus after modified shortcuts", Config::INTEGER{700});
+    g_config.cursorTexturePath =
+        makeShared<CStringValue>("plugin:hypr-agent-protal:cursor_texture_path", "raw ABGR cursor texture path", Config::STRING{""});
+
+    const auto registerOrReset = [](auto& value) {
+        if (!registerConfigValue(value))
+            value.reset();
+    };
+
+    registerOrReset(g_config.allowPointer);
+    registerOrReset(g_config.allowKeyboard);
+    registerOrReset(g_config.allowScreenshot);
+    registerOrReset(g_config.allowSession);
+    registerOrReset(g_config.showIndicator);
+    registerOrReset(g_config.indicatorTimeoutMs);
+    registerOrReset(g_config.keyboardRestoreDelayMs);
+    registerOrReset(g_config.cursorTexturePath);
 }
 
 std::filesystem::path defaultCursorTexturePath() {
@@ -385,7 +436,7 @@ void drawTexturePolygon(std::vector<uint8_t>& pixels, const std::array<Vector2D,
             blendTexturePixel(pixels, x, y, color, polygonCoverage(x, y, polygon));
 }
 
-SP<CTexture> loadOfficialCodexCursorTexture() {
+SP<Render::ITexture> loadOfficialCodexCursorTexture() {
     const auto configuredPath = configString("cursor_texture_path", "");
     const auto texturePath = configuredPath.empty() ? defaultCursorTexturePath() : expandUserPath(configuredPath);
     if (texturePath.empty() || !std::filesystem::exists(texturePath))
@@ -403,10 +454,10 @@ SP<CTexture> loadOfficialCodexCursorTexture() {
     g_codexCursorTextureSize = Vector2D{CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE, CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE};
     g_codexCursorHotspotX = CODEX_OFFICIAL_CURSOR_HOTSPOT_X;
     g_codexCursorHotspotY = CODEX_OFFICIAL_CURSOR_HOTSPOT_Y;
-    return makeShared<CTexture>(DRM_FORMAT_ABGR8888, pixels.data(), CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE * 4, g_codexCursorTextureSize, true);
+    return makeShared<Render::GL::CGLTexture>(DRM_FORMAT_ABGR8888, pixels.data(), CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE * 4, g_codexCursorTextureSize, true);
 }
 
-SP<CTexture> codexCursorTexture() {
+SP<Render::ITexture> codexCursorTexture() {
     if (g_codexCursorTexture)
         return g_codexCursorTexture;
 
@@ -433,8 +484,8 @@ SP<CTexture> codexCursorTexture() {
     g_codexCursorTextureSize = Vector2D{CODEX_CURSOR_TEXTURE_SIZE, CODEX_CURSOR_TEXTURE_SIZE};
     g_codexCursorHotspotX = CODEX_CURSOR_HOTSPOT_X;
     g_codexCursorHotspotY = CODEX_CURSOR_HOTSPOT_Y;
-    g_codexCursorTexture = makeShared<CTexture>(DRM_FORMAT_ABGR8888, pixels.data(), CODEX_CURSOR_TEXTURE_SIZE * 4,
-                                                g_codexCursorTextureSize, true);
+    g_codexCursorTexture = makeShared<Render::GL::CGLTexture>(DRM_FORMAT_ABGR8888, pixels.data(), CODEX_CURSOR_TEXTURE_SIZE * 4,
+                                                              g_codexCursorTextureSize, true);
     return g_codexCursorTexture;
 }
 
@@ -578,11 +629,11 @@ void renderAgentIndicator(eRenderStage stage) {
         return;
 
     const auto targetWindow = g_agentPointerWindow.lock();
-    const auto currentWindow = g_pHyprOpenGL->m_renderData.currentWindow.lock();
+    const auto currentWindow = g_pHyprRenderer->m_renderData.currentWindow.lock();
     if (!targetWindow || currentWindow != targetWindow)
         return;
 
-    const auto monitor = g_pHyprOpenGL->m_renderData.pMonitor.lock();
+    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
     if (!monitor)
         return;
 
@@ -1941,14 +1992,7 @@ APICALL EXPORT std::string PLUGIN_API_VERSION() {
 APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pluginHandle = handle;
 
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_pointer", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_keyboard", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_screenshot", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:allow_session", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:show_indicator", Hyprlang::INT{1});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:indicator_timeout_ms", Hyprlang::INT{30000});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:keyboard_restore_delay_ms", Hyprlang::INT{700});
-    HyprlandAPI::addConfigValue(g_pluginHandle, "plugin:hypr-agent-protal:cursor_texture_path", Hyprlang::STRING{""});
+    registerPluginConfig();
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer-relative", dispatchPointerRelative);
@@ -2002,5 +2046,6 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_agentPointerUpdated.reset();
     g_agentPointerMotionStarted.reset();
     g_agentPointerAction.clear();
+    g_config = {};
     g_pluginHandle = nullptr;
 }

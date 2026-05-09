@@ -2,7 +2,8 @@
 name = "hypr-agent-protal"
 authors = ["wilf"]
 commit_pins = [
-    ["0.54.3", ""]
+    ["0.54.3", ""],
+    ["0.55.0", ""]
 ]
 
 ["hypr-agent-protal"]
