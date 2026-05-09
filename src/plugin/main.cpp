@@ -20,6 +20,8 @@
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
+#include <lua.h>
+#include <lauxlib.h>
 #include <hyprutils/signal/Listener.hpp>
 
 #include <algorithm>
@@ -96,6 +98,7 @@ constexpr const char* LUA_CONFIG_SHOW_INDICATOR            = "plugin.hypr_agent_
 constexpr const char* LUA_CONFIG_INDICATOR_TIMEOUT_MS      = "plugin.hypr_agent_protal.indicator_timeout_ms";
 constexpr const char* LUA_CONFIG_KEYBOARD_RESTORE_DELAY_MS = "plugin.hypr_agent_protal.keyboard_restore_delay_ms";
 constexpr const char* LUA_CONFIG_CURSOR_TEXTURE_PATH       = "plugin.hypr_agent_protal.cursor_texture_path";
+constexpr const char* LUA_PLUGIN_NAMESPACE                 = "hypr_agent_protal";
 
 constexpr int    CODEX_CURSOR_TEXTURE_SIZE = 160;
 constexpr int    CODEX_OFFICIAL_CURSOR_TEXTURE_SIZE = 252;
@@ -2040,6 +2043,90 @@ SDispatchResult dispatchSession(const std::string& args) {
     return {.success = false, .error = "unknown session action"};
 }
 
+enum class eLuaDispatcher : int {
+    POINTER,
+    POINTER_RELATIVE,
+    INDICATOR,
+    KEYBOARD,
+    SCREENSHOT,
+    SESSION,
+};
+
+SDispatchResult dispatchLuaPayload(eLuaDispatcher dispatcher, const std::string& payload) {
+    switch (dispatcher) {
+        case eLuaDispatcher::POINTER: return dispatchPointer(payload);
+        case eLuaDispatcher::POINTER_RELATIVE: return dispatchPointerRelative(payload);
+        case eLuaDispatcher::INDICATOR: return dispatchIndicator(payload);
+        case eLuaDispatcher::KEYBOARD: return dispatchKeyboard(payload);
+        case eLuaDispatcher::SCREENSHOT: return dispatchScreenshot(payload);
+        case eLuaDispatcher::SESSION: return dispatchSession(payload);
+    }
+
+    return {.success = false, .error = "unknown hypr-agent-protal lua dispatcher"};
+}
+
+int luaDispatchClosure(lua_State* L) {
+    const auto dispatcher = static_cast<eLuaDispatcher>(lua_tointeger(L, lua_upvalueindex(1)));
+    const auto payloadArg = lua_tostring(L, lua_upvalueindex(2));
+    const auto payload    = std::string{payloadArg ? payloadArg : ""};
+    const auto result     = dispatchLuaPayload(dispatcher, payload);
+
+    lua_newtable(L);
+    lua_pushboolean(L, result.success);
+    lua_setfield(L, -2, "ok");
+    lua_pushboolean(L, result.passEvent);
+    lua_setfield(L, -2, "pass_event");
+    if (!result.success) {
+        lua_pushstring(L, result.error.c_str());
+        lua_setfield(L, -2, "error");
+    }
+    return 1;
+}
+
+int makeLuaDispatcher(lua_State* L, eLuaDispatcher dispatcher) {
+    const auto* payload = luaL_checkstring(L, 1);
+    lua_pushinteger(L, static_cast<lua_Integer>(dispatcher));
+    lua_pushstring(L, payload);
+    lua_pushcclosure(L, luaDispatchClosure, 2);
+    return 1;
+}
+
+int luaPointer(lua_State* L) {
+    return makeLuaDispatcher(L, eLuaDispatcher::POINTER);
+}
+
+int luaPointerRelative(lua_State* L) {
+    return makeLuaDispatcher(L, eLuaDispatcher::POINTER_RELATIVE);
+}
+
+int luaIndicator(lua_State* L) {
+    return makeLuaDispatcher(L, eLuaDispatcher::INDICATOR);
+}
+
+int luaKeyboard(lua_State* L) {
+    return makeLuaDispatcher(L, eLuaDispatcher::KEYBOARD);
+}
+
+int luaScreenshot(lua_State* L) {
+    return makeLuaDispatcher(L, eLuaDispatcher::SCREENSHOT);
+}
+
+int luaSession(lua_State* L) {
+    return makeLuaDispatcher(L, eLuaDispatcher::SESSION);
+}
+
+void registerLuaDispatchers() {
+    if (!Config::mgr() || Config::mgr()->type() != Config::CONFIG_LUA)
+        return;
+
+    HyprlandAPI::addLuaFunction(g_pluginHandle, LUA_PLUGIN_NAMESPACE, "pointer", luaPointer);
+    HyprlandAPI::addLuaFunction(g_pluginHandle, LUA_PLUGIN_NAMESPACE, "pointer_relative", luaPointerRelative);
+    HyprlandAPI::addLuaFunction(g_pluginHandle, LUA_PLUGIN_NAMESPACE, "indicator", luaIndicator);
+    HyprlandAPI::addLuaFunction(g_pluginHandle, LUA_PLUGIN_NAMESPACE, "keyboard", luaKeyboard);
+    HyprlandAPI::addLuaFunction(g_pluginHandle, LUA_PLUGIN_NAMESPACE, "screenshot", luaScreenshot);
+    HyprlandAPI::addLuaFunction(g_pluginHandle, LUA_PLUGIN_NAMESPACE, "session", luaSession);
+}
+
 } // namespace
 
 APICALL EXPORT std::string PLUGIN_API_VERSION() {
@@ -2050,6 +2137,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pluginHandle = handle;
 
     registerPluginConfig();
+    registerLuaDispatchers();
 
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer", dispatchPointer);
     HyprlandAPI::addDispatcherV2(g_pluginHandle, "hypr-agent-protal:pointer-relative", dispatchPointerRelative);

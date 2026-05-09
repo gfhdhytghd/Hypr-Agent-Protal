@@ -365,8 +365,58 @@ def hyprctl_environment() -> dict[str, str]:
     return env
 
 
-def dispatch(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(["hyprctl", "dispatch", *args], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=hyprctl_environment(), check=False)
+def lua_quote(value: str) -> str:
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 32 <= code <= 126:
+            out.append(ch)
+        else:
+            out.append(f"\\{code:03d}")
+    out.append('"')
+    return "".join(out)
+
+
+def lua_plugin_dispatcher(dispatcher: str, payload: str) -> str | None:
+    mapping = {
+        "hypr-agent-protal:pointer": "pointer",
+        "hypr-agent-protal:pointer-relative": "pointer_relative",
+        "hypr-agent-protal:indicator": "indicator",
+        "hypr-agent-protal:keyboard": "keyboard",
+        "hypr-agent-protal:screenshot": "screenshot",
+        "hypr-agent-protal:session": "session",
+    }
+    function = mapping.get(dispatcher)
+    if not function:
+        return None
+    return f"hl.plugin.hypr_agent_protal.{function}({lua_quote(payload)})"
+
+
+def has_lua_plugin_config() -> bool:
+    result = hyprctl("getoption", "plugin.hypr_agent_protal.allow_pointer")
+    return result.returncode == 0 and "no such" not in result.stdout.lower() and "unknown" not in result.stdout.lower()
+
+
+def dispatch(dispatcher: str, payload: str = "") -> subprocess.CompletedProcess:
+    if has_lua_plugin_config():
+        lua_dispatcher = lua_plugin_dispatcher(dispatcher, payload)
+        if lua_dispatcher:
+            return subprocess.run(["hyprctl", "dispatch", lua_dispatcher], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=hyprctl_environment(), check=False)
+
+    args = ["hyprctl", "dispatch", dispatcher]
+    if payload:
+        args.append(payload)
+    return subprocess.run(args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=hyprctl_environment(), check=False)
 
 
 def hyprctl(*args: str) -> subprocess.CompletedProcess:
