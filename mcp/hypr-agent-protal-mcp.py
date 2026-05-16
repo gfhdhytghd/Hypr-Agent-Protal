@@ -708,6 +708,42 @@ def hyprctl_environment() -> dict[str, str]:
     return env
 
 
+def lua_quote(value: str) -> str:
+    out = ['"']
+    for ch in value:
+        code = ord(ch)
+        if ch == "\\":
+            out.append("\\\\")
+        elif ch == '"':
+            out.append('\\"')
+        elif ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif 32 <= code <= 126:
+            out.append(ch)
+        else:
+            out.append(f"\\{code:03d}")
+    out.append('"')
+    return "".join(out)
+
+
+def hyprland_config_provider() -> str | None:
+    proc = subprocess.run(["hyprctl", "systeminfo"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=hyprctl_environment(), check=False)
+    if proc.returncode != 0:
+        return None
+    match = re.search(r"^configProvider:\s*(\S+)", proc.stdout, re.MULTILINE)
+    if not match:
+        return None
+    return match.group(1).lower()
+
+
+def is_lua_config_provider() -> bool:
+    return hyprland_config_provider() == "lua"
+
+
 def session_environment() -> dict[str, str]:
     env = hyprctl_environment()
     runtime_dir = env.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
@@ -1116,9 +1152,13 @@ def hyprctl_exec(command: str) -> str:
     if not hyprctl:
         raise RuntimeError("hyprctl not found")
     env = hyprctl_environment()
-    proc = subprocess.run([hyprctl, "dispatch", "exec", command], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
+    if is_lua_config_provider():
+        dispatch_args = [hyprctl, "dispatch", f"hl.dsp.exec_cmd({lua_quote(command)})"]
+    else:
+        dispatch_args = [hyprctl, "dispatch", "exec", command]
+    proc = subprocess.run(dispatch_args, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, check=False)
     if proc.returncode != 0:
-        raise RuntimeError((proc.stderr or proc.stdout or f"hyprctl dispatch exec failed with exit code {proc.returncode}").strip())
+        raise RuntimeError((proc.stderr or proc.stdout or f"{' '.join(dispatch_args[:3])} failed with exit code {proc.returncode}").strip())
     return proc.stdout.strip()
 
 

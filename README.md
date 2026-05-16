@@ -2,7 +2,8 @@
 
 hypr-agent-protal is an experimental Hyprland plugin plus MCP bridge for background agent control.
 
-It exposes five compositor dispatchers:
+It exposes five compositor dispatchers. With the legacy hyprlang config provider
+they can be called with the normal dispatcher syntax:
 
 ```ini
 hyprctl dispatch hypr-agent-protal:screenshot /tmp/hypr-agent-protal-session.json
@@ -13,6 +14,22 @@ hyprctl dispatch hypr-agent-protal:indicator 'address:0x1234,930,520,type'
 hyprctl dispatch hypr-agent-protal:keyboard 'address:0x1234,tap,v,ctrl'
 hyprctl dispatch hypr-agent-protal:session 'begin,address:0x1234'
 ```
+
+With the Lua config provider, `hyprctl dispatch` evaluates its argument as a Lua
+dispatcher expression. Use the Lua plugin functions instead:
+
+```sh
+hyprctl dispatch 'hl.plugin.hypr_agent_protal.screenshot("/tmp/hypr-agent-protal-session.json")'
+hyprctl dispatch 'hl.plugin.hypr_agent_protal.screenshot("/tmp/hypr-agent-protal-session.json,address:0x1234")'
+hyprctl dispatch 'hl.plugin.hypr_agent_protal.pointer("address:0x1234,930,520,click,left")'
+hyprctl dispatch 'hl.plugin.hypr_agent_protal.pointer("address:0x1234,930,520,drag,left,1180,760,0.2")'
+hyprctl dispatch 'hl.plugin.hypr_agent_protal.indicator("address:0x1234,930,520,type")'
+hyprctl dispatch 'hl.plugin.hypr_agent_protal.keyboard("address:0x1234,tap,v,ctrl")'
+hyprctl dispatch 'hl.plugin.hypr_agent_protal.session("begin,address:0x1234")'
+```
+
+`scripts/hypr-agent-protalctl` detects `configProvider: lua` and emits the Lua
+dispatcher expression automatically.
 
 The screenshot dispatcher renders active monitor workspaces into RGBA artifacts from inside Hyprland, then writes a JSON session file. When a window selector is supplied, it renders that window directly into an offscreen framebuffer, so the artifact is not occluded by other windows. The pointer dispatcher resolves the target with `g_pCompositor->getWindowByRegex()`, focuses the target surface only for the injected pointer events, sends motion/button/frame events through `g_pSeatManager`, then restores the previous pointer focus. Successful background pointer actions also render a non-interactive Codex-style cursor overlay with the target window's render pass, so it appears on the controlled app when that app is visible instead of being drawn as a global topmost layer.
 
@@ -64,9 +81,9 @@ Recommended agent workflow:
    `reuse_existing=false` or `new_window=true` only when the user explicitly
    asks for a new instance/window.
 4. If the requested app is not in `list_apps`, call `launch_app` or `open_app`.
-   Do not guess a shell command outside the MCP tool. The launcher uses
-   `hyprctl dispatch exec`, waits for the Hyprland window, and returns a
-   `target` selector plus the next `get_app_state` hint.
+   Do not guess a shell command outside the MCP tool. The launcher dispatches
+   `exec` through the active config provider, waits for the Hyprland window, and
+   returns a `target` selector plus the next `get_app_state` hint.
 5. Call `get_app_state` for semantic state, or `screenshot` with `app` for an
    image-only refresh.
 6. If `get_app_state` reports `ACTIVE RELATED POPUP DETECTED`, operate the
