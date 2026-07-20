@@ -46,11 +46,11 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build
 ```
 
-To build against the local Hyprland v0.55 preview checkout:
+To build against the local Hyprland v0.56 checkout:
 
 ```sh
-PKG_CONFIG_PATH="$HOME/data/Hyprland/build${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" cmake -S . -B build-v055 -DCMAKE_BUILD_TYPE=Debug -DHYPRLAND_SOURCE_DIR="$HOME/data/Hyprland"
-cmake --build build-v055
+PKG_CONFIG_PATH="$HOME/data/Hyprland/build${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" cmake -S . -B build-v056 -DCMAKE_BUILD_TYPE=Debug -DHYPRLAND_SOURCE_DIR="$HOME/data/Hyprland"
+cmake --build build-v056
 ```
 
 Install or load `build/libhypr-agent-protal.so` as a Hyprland plugin. With hyprpm:

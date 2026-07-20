@@ -8,6 +8,9 @@
 #define private public
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/state/GlobalWindowController.hpp>
+#include <hyprland/src/desktop/state/ViewState.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
@@ -18,6 +21,7 @@
 #include <hyprland/src/render/Texture.hpp>
 #include <hyprland/src/render/gl/GLTexture.hpp>
 #include <hyprland/src/render/pass/TexPassElement.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/xwayland/XSurface.hpp>
 #undef private
 
@@ -1136,17 +1140,14 @@ CBox windowMainSurfaceGoalBox(const PHLWINDOW& window) {
     if (!window)
         return {};
 
-    return CBox{window->m_realPosition ? window->m_realPosition->goal().x : window->m_position.x,
-                window->m_realPosition ? window->m_realPosition->goal().y : window->m_position.y,
-                window->m_realSize ? window->m_realSize->goal().x : window->m_size.x,
-                window->m_realSize ? window->m_realSize->goal().y : window->m_size.y};
+    return window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_GOAL);
 }
 
 bool sameXWaylandClientFamily(const PHLWINDOW& root, const PHLWINDOW& candidate) {
     if (!root || !candidate || root == candidate || !root->m_isX11 || !candidate->m_isX11)
         return false;
 
-    const auto transientFor = candidate->x11TransientFor();
+    const auto transientFor = candidate->x11Parent();
     if (transientFor && transientFor == root)
         return true;
 
@@ -1178,7 +1179,7 @@ PHLWINDOW xwaylandRelatedWindowAt(const PHLWINDOW& root, const Vector2D& globalP
     PHLWINDOW best = root;
     double    bestArea = std::numeric_limits<double>::infinity();
 
-    for (const auto& candidate : g_pCompositor->m_windows) {
+    for (const auto& candidate : Desktop::windowState()->windows()) {
         if (!candidate || !candidate->m_isMapped || candidate->isHidden() || !sameXWaylandClientFamily(root, candidate))
             continue;
 
@@ -1220,7 +1221,6 @@ void constrainRelatedWindowFocusAndLayer(const PHLWINDOW& window) {
         return;
 
     window->m_noInitialFocus = true;
-    window->m_createdOverFullscreen = false;
     window->m_suppressedEvents |= Desktop::View::SUPPRESS_ACTIVATE | Desktop::View::SUPPRESS_ACTIVATE_FOCUSONLY;
 }
 
@@ -1230,34 +1230,7 @@ void restackRelatedWindowWithRoot(const PHLWINDOW& root, const PHLWINDOW& window
 
     constrainRelatedWindowFocusAndLayer(window);
 
-    auto& windows = g_pCompositor->m_windows;
-    auto  windowIt = std::find(windows.begin(), windows.end(), window);
-    if (windowIt == windows.end())
-        return;
-
-    const auto moved = *windowIt;
-    windows.erase(windowIt);
-
-    auto insertionIt = windows.end();
-    if (window->m_isFloating && window->m_workspace) {
-        insertionIt = std::find_if(windows.begin(), windows.end(), [&root, &window](const auto& candidate) {
-            if (!candidate || candidate == root || candidate == window || !candidate->m_isMapped || candidate->isHidden() || !candidate->m_isFloating)
-                return false;
-            if (candidate->m_workspace != window->m_workspace)
-                return false;
-            return !sameClientFamily(root, candidate);
-        });
-    }
-
-    if (insertionIt != windows.end()) {
-        windows.insert(insertionIt, moved);
-    } else {
-        auto rootIt = std::find(windows.begin(), windows.end(), root);
-        if (rootIt == windows.end())
-            windows.push_back(moved);
-        else
-            windows.insert(std::next(rootIt), moved);
-    }
+    Desktop::windowState()->raise(window);
 
     if (g_pHyprRenderer) {
         g_pHyprRenderer->damageWindow(root);
@@ -1328,7 +1301,7 @@ void moveRelatedWindowToSessionWorkspace(WorkspaceSession& session, const PHLWIN
         return;
 
     if (window->m_workspace != targetWorkspace)
-        g_pCompositor->moveWindowToWorkspaceSafe(window, targetWorkspace);
+        Desktop::globalWindowController()->moveWindowToWorkspace(window, targetWorkspace);
 
     if (root) {
         restackRelatedWindowWithRoot(root, window);
@@ -1340,7 +1313,7 @@ void syncWorkspaceSession(WorkspaceSession& session) {
     if (!g_pCompositor)
         return;
 
-    for (const auto& window : g_pCompositor->m_windows) {
+    for (const auto& window : Desktop::windowState()->windows()) {
         if (workspaceSessionMatchesWindow(session, window))
             moveRelatedWindowToSessionWorkspace(session, window);
     }
@@ -1370,7 +1343,7 @@ std::optional<TargetSurface> resolveTargetSurface(const std::string& targetRegex
     if (!g_pCompositor)
         return std::nullopt;
 
-    auto window = g_pCompositor->getWindowByRegex(targetRegex);
+    auto window = Desktop::viewState()->query().selector(targetRegex).mappedOnly().runWindow();
     if (!window || !window->m_isMapped)
         return std::nullopt;
 
@@ -1388,7 +1361,8 @@ std::optional<TargetSurface> resolveTargetSurface(const std::string& targetRegex
     }
 
     Vector2D local;
-    auto     surface = g_pCompositor->vectorWindowToSurface(globalPos, window, local);
+    auto [surface, surfaceLocal] = window->wlSurface()->resource()->at(globalPos - window->m_realPosition->goal(), true);
+    local = surfaceLocal;
     if (!surface && window->wlSurface() && window->wlSurface()->resource()) {
         const auto mainBox = windowMainSurfaceGoalBox(window);
         local = globalPos - mainBox.pos();
@@ -1406,12 +1380,12 @@ std::optional<Vector2D> targetPointToGlobal(const std::string& targetRegex, cons
     if (!g_pCompositor)
         return std::nullopt;
 
-    const auto window = g_pCompositor->getWindowByRegex(targetRegex);
+    const auto window = Desktop::viewState()->query().selector(targetRegex).mappedOnly().runWindow();
     if (!window || !window->m_isMapped)
         return std::nullopt;
 
     const auto box = windowMainSurfaceGoalBox(window);
-    return Vector2D{box.x + point.x, box.y + point.y};
+    return Vector2D(box.x + point.x, box.y + point.y);
 }
 
 std::optional<TargetSurface> resolveTargetSurfaceForPoint(const std::string& targetRegex, const Vector2D& point, bool windowRelative) {
@@ -1425,7 +1399,7 @@ std::optional<TargetSurface> resolveTargetMainSurface(const std::string& targetR
     if (!g_pCompositor)
         return std::nullopt;
 
-    const auto window = g_pCompositor->getWindowByRegex(targetRegex);
+    const auto window = Desktop::viewState()->query().selector(targetRegex).mappedOnly().runWindow();
     if (!window || !window->m_isMapped || !window->wlSurface() || !window->wlSurface()->resource())
         return std::nullopt;
 
@@ -1863,7 +1837,7 @@ SDispatchResult dispatchIndicator(const std::string& args) {
     if (!x || !y)
         return {.success = false, .error = "indicator coordinates must be finite numbers"};
 
-    auto window = g_pCompositor->getWindowByRegex(parts[0]);
+    auto window = Desktop::viewState()->query().selector(parts[0]).mappedOnly().runWindow();
     if (!window || !window->m_isMapped)
         return {.success = false, .error = "target window not found"};
 
@@ -1990,7 +1964,7 @@ SDispatchResult dispatchSession(const std::string& args) {
         if (parts.size() < 2)
             return {.success = false, .error = "session begin requires a target window selector"};
 
-        const auto root = g_pCompositor->getWindowByRegex(parts[1]);
+        const auto root = Desktop::viewState()->query().selector(parts[1]).mappedOnly().runWindow();
         if (!root || !root->m_isMapped)
             return {.success = false, .error = "target window not found"};
 
@@ -2012,7 +1986,7 @@ SDispatchResult dispatchSession(const std::string& args) {
 
     if (action == "sync") {
         if (parts.size() >= 2) {
-            const auto root = g_pCompositor->getWindowByRegex(parts[1]);
+            const auto root = Desktop::viewState()->query().selector(parts[1]).mappedOnly().runWindow();
             if (!root)
                 return {.success = false, .error = "target window not found"};
             auto existing = std::find_if(g_workspaceSessions.begin(), g_workspaceSessions.end(), [&root](const auto& session) { return session.root.lock() == root; });
@@ -2028,7 +2002,7 @@ SDispatchResult dispatchSession(const std::string& args) {
 
     if (action == "end") {
         if (parts.size() >= 2) {
-            const auto root = g_pCompositor->getWindowByRegex(parts[1]);
+            const auto root = Desktop::viewState()->query().selector(parts[1]).mappedOnly().runWindow();
             if (!root)
                 return {.success = false, .error = "target window not found"};
 

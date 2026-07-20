@@ -6,12 +6,15 @@
 #define protected public
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/state/ViewState.hpp>
+#include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/managers/input/InputManager.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/render/gl/GLFramebuffer.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
 #undef protected
 #undef private
 
@@ -488,12 +491,9 @@ bool isWindowVisible(const PHLWINDOW& window) {
 }
 
 Json windowJson(const PHLWINDOW& window) {
-    CBox visible{window->m_realPosition ? window->m_realPosition->goal().x : window->m_position.x,
-                 window->m_realPosition ? window->m_realPosition->goal().y : window->m_position.y,
-                 window->m_realSize ? window->m_realSize->goal().x : window->m_size.x,
-                 window->m_realSize ? window->m_realSize->goal().y : window->m_size.y};
+    CBox visible = window->geometricBox(Desktop::View::IGeometric::GEOMETRIC_GOAL);
     const auto full = window->getFullWindowBoundingBox();
-    const auto transientFor = window->m_isX11 ? window->x11TransientFor() : PHLWINDOW{};
+    const auto transientFor = window->m_isX11 ? window->x11Parent() : PHLWINDOW{};
 
     return Json{
         {"address", "0x" + pointerId(window.get())},
@@ -550,7 +550,7 @@ ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJso
 
     const auto frozenTime = Time::steadyNow();
     if (!targetRegex.empty()) {
-        const auto window = g_pCompositor->getWindowByRegex(std::string(targetRegex));
+        const auto window = Desktop::viewState()->query().selector(targetRegex).mappedOnly().runWindow();
         if (!window || !window->m_isMapped)
             return {.success = false, .error = "target window not found"};
 
@@ -595,7 +595,7 @@ ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJso
     }
 
     int        monitorIndex = 0;
-    for (const auto& monitor : g_pCompositor->m_monitors) {
+    for (const auto& monitor : State::monitorState()->monitors()) {
         if (!monitor)
             continue;
 
@@ -617,7 +617,7 @@ ScreenshotResult captureScreenshotSession(const std::filesystem::path& outputJso
         ++monitorIndex;
     }
 
-    for (const auto& window : g_pCompositor->m_windows) {
+    for (const auto& window : Desktop::windowState()->windows()) {
         if (!window || !window->m_isMapped)
             continue;
         root["windows"].push_back(windowJson(window));
