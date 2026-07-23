@@ -1361,10 +1361,10 @@ std::optional<TargetSurface> resolveTargetSurface(const std::string& targetRegex
     }
 
     Vector2D local;
-    auto [surface, surfaceLocal] = window->wlSurface()->resource()->at(globalPos - window->m_realPosition->goal(), true);
+    const auto mainBox = windowMainSurfaceGoalBox(window);
+    auto [surface, surfaceLocal] = window->wlSurface()->resource()->at(globalPos - mainBox.pos(), true);
     local = surfaceLocal;
     if (!surface && window->wlSurface() && window->wlSurface()->resource()) {
-        const auto mainBox = windowMainSurfaceGoalBox(window);
         local = globalPos - mainBox.pos();
         surface = window->wlSurface()->resource();
     }
@@ -2133,7 +2133,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         .name = "hypr-agent-protal",
         .description = "Background screenshot, pointer, keyboard, workspace guard, and backend-independent visible agent cursor primitives for Hyprland agents",
         .author = "wilf",
-        .version = "0.3.44",
+        .version = "0.3.46",
     };
 }
 
