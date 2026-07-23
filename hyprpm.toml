@@ -2,9 +2,9 @@
 name = "hypr-agent-protal"
 authors = ["wilf"]
 commit_pins = [
-    ["0.54.3", ""],
-    ["0.55.0", ""],
-    ["0.56.0", ""]
+    ["521ece463c4a9d3d128670688a34756805a4328f", "939823413e42ebc1f08315c1a530364762e1a1d2"],
+    ["af923e30d1d24f1f4a4f5cb8308065173c1d9539", "8a8cb4bab3861838e71f5447fbe420d12dd68024"],
+    ["36b2e0cfe0c6094dbc47bd42a437431315bb3087", "7e894dac96f3802ff43073ccc2c306a95e03bf53"]
 ]
 
 ["hypr-agent-protal"]
